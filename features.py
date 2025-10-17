@@ -1,6 +1,9 @@
 import logging
 import torch
 from transformers import AutoImageProcessor, AutoModel
+import cv2
+import numpy as np
+from PIL import Image
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -24,8 +27,29 @@ class FeatureExtractor:
         grouped_layers: list = [],
         docrop: bool = False,
         is_cosine: bool = False,
+        use_clahe: bool = False,
     ):
         """Extracts and aggregates features from a batch of images."""
+        if use_clahe:
+            processed_imgs = []
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            for img in pil_imgs:
+                # Convert PIL image to numpy array (RGB)
+                img_np = np.array(img)
+                # Convert RGB to LAB
+                img_lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
+                # Split LAB channels
+                l, a, b = cv2.split(img_lab)
+                # Apply CLAHE to L-channel
+                l_clahe = clahe.apply(l)
+                # Merge channels back
+                img_lab_clahe = cv2.merge((l_clahe, a, b))
+                # Convert LAB back to RGB
+                img_rgb_clahe = cv2.cvtColor(img_lab_clahe, cv2.COLOR_LAB2RGB)
+                # Convert back to PIL image
+                processed_imgs.append(Image.fromarray(img_rgb_clahe))
+            pil_imgs = processed_imgs
+
         inputs = self.processor(
             images=pil_imgs,
             return_tensors="pt",

@@ -45,5 +45,5 @@ def calculate_anomaly_scores(X: np.ndarray, pca: dict, method: str, drop_k: int 
 
 def post_process_map(anomaly_map: np.ndarray, res: int):
     """Resizes and blurs the anomaly map."""
-    map_resized = cv2.resize(anomaly_map, (res, res), interpolation=cv2.BILINEAR)
+    map_resized = cv2.resize(anomaly_map, (res, res), interpolation=cv2.INTER_CUBIC)
     return cv2.GaussianBlur(map_resized, (5, 5), 0)

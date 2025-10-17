@@ -30,7 +30,7 @@ def get_args():
     parser.add_argument(
         "--model_ckpt",
         type=str,
-        default="facebook/dinov3-vitb16-pretrain-lvd1689m",
+        default="facebook/dinov3-vit7b16-pretrain-lvd1689m",
         help="HuggingFace model checkpoint for feature extraction.",
     )
     parser.add_argument(
@@ -62,6 +62,11 @@ def get_args():
         "--docrop",
         action="store_true",
         help="Apply center cropping during preprocessing.",
+    )
+    parser.add_argument(
+        "--use_clahe",
+        action="store_true",
+        help="Apply CLAHE to the images.",
     )
 
     # --- Anomaly Detection (PCA) Arguments ---

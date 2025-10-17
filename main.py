@@ -76,6 +76,7 @@ def main():
             grouped_layers,
             args.docrop,
             is_cosine=(args.score_method == "cosine"),
+            use_clahe=args.use_clahe,
         )
         feature_dim = temp_tokens.shape[-1]
         total_tokens = len(train_paths) * h_p * w_p
@@ -96,6 +97,7 @@ def main():
                     grouped_layers,
                     args.docrop,
                     is_cosine=(args.score_method == "cosine"),
+                    use_clahe=args.use_clahe,
                 )
                 yield tokens_batch.reshape(-1, feature_dim)
 
@@ -120,6 +122,7 @@ def main():
                     grouped_layers,
                     args.docrop,
                     is_cosine=(args.score_method == "cosine"),
+                    use_clahe=args.use_clahe,
                 )
                 scores = calculate_anomaly_scores(
                     tokens.reshape(-1, feature_dim),
@@ -152,6 +155,7 @@ def main():
                 grouped_layers,
                 args.docrop,
                 is_cosine=(args.score_method == "cosine"),
+                use_clahe=args.use_clahe,
             )
 
             scores = calculate_anomaly_scores(
