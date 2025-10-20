@@ -32,7 +32,7 @@ class BaseDatasetHandler:
         mask = (
             Image.open(gt_path_str)
             .convert("L")
-            .resize((res, res), Image.Resampling.NEAREST)
+            .resize(res, Image.Resampling.NEAREST)
         )
         return (np.array(mask) > 0).astype(np.uint8)
 
@@ -80,11 +80,33 @@ class MVTecAD2Dataset(BaseDatasetHandler):
         )
 
 
+class VisADataset(BaseDatasetHandler):
+    """Handler for the VisA dataset structure."""
+
+    def get_train_paths(self):
+        return sorted(glob.glob(str(self.category_path / "Data" / "Images" / "Good" / "*.JPG")))
+
+    def get_test_paths(self):
+        return sorted(
+            glob.glob(str(self.category_path / "Data" / "Images" / "Anomaly" / "*.JPG"))
+        )
+
+    def get_ground_truth_path(self, test_path: str):
+        p = Path(test_path)
+        return str(
+            self.category_path
+            / "Data"
+            / "Masks"
+            / f"{p.stem}.png"
+        )
+
 def get_dataset_handler(name: str, root_path: str, category: str) -> BaseDatasetHandler:
     """Factory function to get the correct dataset handler."""
     if name == "mvtec_ad":
         return MVTecADDataset(root_path, category)
     elif name == "mvtec_ad2":
         return MVTecAD2Dataset(root_path, category)
+    elif name == "visa":
+        return VisADataset(root_path, category)
     else:
         raise ValueError(f"Unknown dataset: {name}")

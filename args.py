@@ -30,14 +30,27 @@ def get_args():
     parser.add_argument(
         "--model_ckpt",
         type=str,
-        default="facebook/dinov3-vit7b16-pretrain-lvd1689m",
+        default="facebook/dinov2-base",
         help="HuggingFace model checkpoint for feature extraction.",
     )
     parser.add_argument(
         "--image_res", type=int, default=256, help="Image resolution for the model."
     )
     parser.add_argument(
-        "--batch_size", type=int, default=16, help="Batch size for feature extraction."
+        "--patch_size",
+        type=int,
+        default=None,
+        help="""Size of the square patches to process. If None, the image is processed
+        in full resolution.""",
+    )
+    parser.add_argument(
+        "--patch_overlap",
+        type=float,
+        default=0.0,
+        help="Overlap ratio between patches.",
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=8, help="Batch size for feature extraction."
     )
     parser.add_argument(
         "--agg_method",
@@ -84,6 +97,26 @@ def get_args():
     )
     parser.add_argument("--whiten", action="store_true", help="Apply whitening in PCA.")
 
+    # --- Kernel PCA Arguments ---
+    parser.add_argument(
+        "--use_kernel_pca",
+        action="store_true",
+        help="Use Kernel PCA instead of standard PCA.",
+    )
+    parser.add_argument(
+        "--kernel_pca_kernel",
+        type=str,
+        default="rbf",
+        choices=["rbf", "linear", "poly", "sigmoid", "cosine"],
+        help="Kernel to use for Kernel PCA.",
+    )
+    parser.add_argument(
+        "--kernel_pca_gamma",
+        type=float,
+        default=None,
+        help="Gamma for rbf, poly and sigmoid kernels. If None, it's set to 1/n_features.",
+    )
+
     # --- Scoring & Evaluation Arguments ---
     parser.add_argument(
         "--score_method",
@@ -110,6 +143,25 @@ def get_args():
         type=float,
         default=0.05,
         help="Integration limit for AU-PRO calculation.",
+    )
+
+    # --- Specular Reflection Filter Arguments ---
+    parser.add_argument(
+        "--use_specular_filter",
+        action="store_true",
+        help="Enable the specular reflection filter as a post-processing step.",
+    )
+    parser.add_argument(
+        "--specular_tau",
+        type=float,
+        default=0.6,
+        help="Binarization threshold for the specular mask.",
+    )
+    parser.add_argument(
+        "--specular_size_threshold_factor",
+        type=float,
+        default=1.5,
+        help="Size threshold factor for filtering specular anomalies.",
     )
 
     # --- Logistics ---
