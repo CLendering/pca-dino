@@ -14,13 +14,25 @@ def save_visualization(
     vis_idx: int,
 ):
     """Saves a multi-panel visualization of an anomaly."""
-    res = anom_map.shape[0]
-    img_np = np.array(img.resize((res, res)))
+
+    img_np = np.array(img.resize((anom_map.shape[1], anom_map.shape[0])))
+
     heatmap = cv2.applyColorMap(
         cv2.normalize(anom_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U),
         cv2.COLORMAP_JET,
     )
     overlay = cv2.addWeighted(img_np, 0.6, heatmap, 0.4, 0)
+
+    if gt_mask.shape != anom_map.shape:
+        print(
+            f"GT had shape {gt_mask.shape}, while Anom map had shape {anom_map.shape}"
+        )
+        gt_mask = cv2.resize(
+            gt_mask.astype(np.uint8),
+            (anom_map.shape[1], anom_map.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        )
+
     gt_mask_vis = cv2.cvtColor((gt_mask * 255).astype(np.uint8), cv2.COLOR_GRAY2RGB)
 
     def add_text(img, text):

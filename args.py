@@ -92,7 +92,7 @@ def get_args():
     parser.add_argument(
         "--pca_ev",
         type=float,
-        default=0.99,
+        default=0.999,
         help="Explained variance to retain for PCA. Used if --pca_dim is None.",
     )
     parser.add_argument("--whiten", action="store_true", help="Apply whitening in PCA.")
@@ -181,6 +181,12 @@ def get_args():
         "--no_log_file",
         action="store_true",
         help="Do not save a log file to the output directory.",
+    )
+    parser.add_argument(
+        "--debug_limit",
+        type=int,
+        default=None,
+        help="Run in debug mode on a subset of N images.",
     )
 
     args = parser.parse_args()

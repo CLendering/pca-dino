@@ -25,16 +25,17 @@ class BaseDatasetHandler:
     def get_ground_truth_path(self, test_path: str):
         raise NotImplementedError
 
-    def get_ground_truth_mask(self, test_path: str, res: int):
+    def get_ground_truth_mask(self, test_path: str, res: tuple):
         gt_path_str = self.get_ground_truth_path(test_path)
         if not gt_path_str or not os.path.exists(gt_path_str):
-            return np.zeros((res, res), dtype=np.uint8)
+            return np.zeros((res[1], res[0]), dtype=np.uint8)
+
         mask = (
             Image.open(gt_path_str)
             .convert("L")
-            .resize(res, Image.Resampling.NEAREST)
+            .resize(res, Image.Resampling.NEAREST)  # res is (W, H)
         )
-        return (np.array(mask) > 0).astype(np.uint8)
+        return (np.array(mask) > 0).astype(np.uint8)  # returns (H, W) array
 
 
 class MVTecADDataset(BaseDatasetHandler):
@@ -80,11 +81,14 @@ class MVTecAD2Dataset(BaseDatasetHandler):
         )
 
 
+# TODO: Data handeling in metrics will not work for VisA, as there is no 'good'subfolder.
 class VisADataset(BaseDatasetHandler):
     """Handler for the VisA dataset structure."""
 
     def get_train_paths(self):
-        return sorted(glob.glob(str(self.category_path / "Data" / "Images" / "Good" / "*.JPG")))
+        return sorted(
+            glob.glob(str(self.category_path / "Data" / "Images" / "Good" / "*.JPG"))
+        )
 
     def get_test_paths(self):
         return sorted(
@@ -93,12 +97,8 @@ class VisADataset(BaseDatasetHandler):
 
     def get_ground_truth_path(self, test_path: str):
         p = Path(test_path)
-        return str(
-            self.category_path
-            / "Data"
-            / "Masks"
-            / f"{p.stem}.png"
-        )
+        return str(self.category_path / "Data" / "Masks" / f"{p.stem}.png")
+
 
 def get_dataset_handler(name: str, root_path: str, category: str) -> BaseDatasetHandler:
     """Factory function to get the correct dataset handler."""

@@ -39,9 +39,9 @@ class FeatureExtractor:
                 # Convert RGB to LAB
                 img_lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
                 # Split LAB channels
-                l, a, b = cv2.split(img_lab)
+                l_, a, b = cv2.split(img_lab)
                 # Apply CLAHE to L-channel
-                l_clahe = clahe.apply(l)
+                l_clahe = clahe.apply(l_)
                 # Merge channels back
                 img_lab_clahe = cv2.merge((l_clahe, a, b))
                 # Convert LAB back to RGB
@@ -50,16 +50,23 @@ class FeatureExtractor:
                 processed_imgs.append(Image.fromarray(img_rgb_clahe))
             pil_imgs = processed_imgs
 
+        if docrop:
+            resize_res = int(res / 0.875)
+            do_resize = True
+            size = {"height": resize_res, "width": resize_res}
+            crop_size = {"height": res, "width": res}
+        else:
+            do_resize = True
+            size = {"height": res, "width": res}
+            crop_size = {"height": res, "width": res}
+
         inputs = self.processor(
             images=pil_imgs,
             return_tensors="pt",
-            # Always resize first to the desired input resolution
-            do_resize=True,
-            size={"height": res, "width": res},
-            # Then, perform a center crop (typically for evaluation or a tighter view)
+            do_resize=do_resize,
+            size=size,
             do_center_crop=docrop,
-            # The crop_size determines the final output size after cropping
-            crop_size={"height": res, "width": res},
+            crop_size=crop_size,
         ).to(DEVICE)
 
         outputs = self.model(**inputs, output_hidden_states=True)
@@ -93,7 +100,7 @@ class FeatureExtractor:
                 for group in grouped_layers
             ]
             fused = torch.cat(fused_groups, dim=-1)
-        else:  # 'concat' or 'mean'
+        else:
             feats = [_spatial_from_seq(hidden_states[li]) for li in layers]
             if agg_method == "concat":
                 fused = torch.cat(feats, dim=-1)

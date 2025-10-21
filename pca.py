@@ -51,15 +51,17 @@ class KernelPCAModel:
             "scaler": self.scaler,
             "kpca": self.kpca,
             "k": self.k,
-            "whiten": self.whiten, # Note: Whitening is handled differently in KPCA
+            "whiten": self.whiten,  # Note: Whitening is handled differently in KPCA
             "eps": self.eps,
             "train_features_scaled": features_scaled,
         }
         logging.info("Kernel PCA fit complete.")
         return self.pca_params
 
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logging.info(f"PCAModel will use device: {device}")
+
 
 class PCAModel:
     """
@@ -78,14 +80,16 @@ class PCAModel:
         self.explained_variance_ = None
         self.pca_params = {}
         self.device = device
-        self.dtype = torch.float64 
+        self.dtype = torch.float64
 
-    def fit(self, feature_generator, feature_dim: int, total_tokens: int, num_batches: int):
+    def fit(
+        self, feature_generator, feature_dim: int, total_tokens: int, num_batches: int
+    ):
         logging.info(f"Starting PCA fit on {self.device}...")
-        
+
         # Pass 1: Compute mean
         self.mean_ = torch.zeros(feature_dim, dtype=self.dtype, device=self.device)
-        
+
         for batch in tqdm(
             feature_generator(),
             total=num_batches,
@@ -93,12 +97,14 @@ class PCAModel:
         ):
             batch_gpu = torch.from_numpy(batch).to(self.device, dtype=self.dtype)
             self.mean_ += torch.sum(batch_gpu, axis=0)
-            
+
         self.mean_ /= total_tokens
 
         # Pass 2: Compute covariance
-        cov_matrix = torch.zeros((feature_dim, feature_dim), dtype=self.dtype, device=self.device)
-        
+        cov_matrix = torch.zeros(
+            (feature_dim, feature_dim), dtype=self.dtype, device=self.device
+        )
+
         for batch in tqdm(
             feature_generator(),
             total=num_batches,
@@ -107,7 +113,7 @@ class PCAModel:
             batch_gpu = torch.from_numpy(batch).to(self.device, dtype=self.dtype)
             batch_centered = batch_gpu - self.mean_
             cov_matrix += torch.matmul(batch_centered.T, batch_centered)
-            
+
         cov_matrix /= total_tokens - 1
 
         logging.info("Performing eigendecomposition on GPU...")
@@ -118,14 +124,15 @@ class PCAModel:
         evecs = evecs[:, sorted_indices]
 
         if self.ev_ratio is not None and self.k is None:
-            cumulative_variance = torch.cumsum(self.explained_variance_, dim=0) / torch.sum(
-                self.explained_variance_
-            )
+            cumulative_variance = torch.cumsum(
+                self.explained_variance_, dim=0
+            ) / torch.sum(self.explained_variance_)
             self.k = (
                 torch.searchsorted(
-                    cumulative_variance, 
-                    torch.tensor([self.ev_ratio], dtype=self.dtype, device=self.device)
-                ).item() + 1
+                    cumulative_variance,
+                    torch.tensor([self.ev_ratio], dtype=self.dtype, device=self.device),
+                ).item()
+                + 1
             )
             logging.info(
                 f"PCA: selected k={self.k} components to explain {self.ev_ratio*100:.2f}% of variance."
@@ -151,6 +158,9 @@ class PCAModel:
             "eps": self.eps,
             "cov_Z_inv": torch.linalg.inv(
                 torch.diag(self.explained_variance_[: self.k])
-            ).cpu().numpy().astype(np.float64),
+            )
+            .cpu()
+            .numpy()
+            .astype(np.float64),
         }
         return self.pca_params

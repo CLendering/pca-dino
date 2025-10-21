@@ -72,6 +72,15 @@ def main():
         val_paths = handler.get_validation_paths()
         test_paths = handler.get_test_paths()
 
+        if args.debug_limit is not None:
+            logging.warning(
+                f"--- DEBUG MODE: Limiting validation and test sets to {args.debug_limit} images ---"
+            )
+            if val_paths:
+                val_paths = val_paths[: args.debug_limit]
+            if test_paths:
+                test_paths = test_paths[: args.debug_limit]
+
         if not train_paths:
             logging.warning(f"No training images found for {category}. Skipping.")
             continue
@@ -114,7 +123,10 @@ def main():
                 for path in train_paths:
                     pil_img = Image.open(path).convert("RGB")
                     patch_coords = get_patch_coords(
-                        pil_img.height, pil_img.width, args.patch_size, args.patch_overlap
+                        pil_img.height,
+                        pil_img.width,
+                        args.patch_size,
+                        args.patch_overlap,
                     )
                     for i in range(0, len(patch_coords), args.batch_size):
                         coord_batch = patch_coords[i : i + args.batch_size]
@@ -150,7 +162,7 @@ def main():
             total_tokens = len(train_paths) * h_p * w_p
 
             logging.info(
-                f"Feature dim: {feature_dim}, Tokens per image: {h_p*w_p}, Total train tokens: {total_tokens}"
+                f"Feature dim: {feature_dim}, Tokens per image: {h_p * w_p}, Total train tokens: {total_tokens}"
             )
 
             def feature_generator_full():
@@ -210,7 +222,14 @@ def main():
 
                 if args.patch_size:
                     anomaly_maps_final = process_image_patched(
-                        pil_imgs, extractor, pca_params, args, DEVICE, h_p, w_p, feature_dim
+                        pil_imgs,
+                        extractor,
+                        pca_params,
+                        args,
+                        DEVICE,
+                        h_p,
+                        w_p,
+                        feature_dim,
                     )
                     for anomaly_map_final in anomaly_maps_final:
                         val_scores.extend(anomaly_map_final.flatten())
@@ -225,33 +244,42 @@ def main():
                         is_cosine=(args.score_method == "cosine"),
                         use_clahe=args.use_clahe,
                     )
-                    
-                    b, _, c = tokens.shape
+                    b, _, _, c = tokens.shape
                     tokens_reshaped = tokens.reshape(b * h_p * w_p, c)
-                    
+
                     scores = calculate_anomaly_scores(
                         tokens_reshaped,
                         pca_params,
                         args.score_method,
                         args.drop_k,
                     )
-                    
+
                     anomaly_maps = scores.reshape(b, h_p, w_p)
-                    
+
                     for j in range(anomaly_maps.shape[0]):
-                        anomaly_map_final = post_process_map(anomaly_maps[j], args.image_res)
+                        anomaly_map_final = post_process_map(
+                            anomaly_maps[j], args.image_res
+                        )
 
                         if args.use_specular_filter:
-                            img_tensor = TF.to_tensor(pil_imgs[j]).unsqueeze(0).to(DEVICE)
-                            _, _, conf = specular_mask_torch(img_tensor, tau=args.specular_tau)
+                            img_tensor = (
+                                TF.to_tensor(pil_imgs[j]).unsqueeze(0).to(DEVICE)
+                            )
+                            _, _, conf = specular_mask_torch(
+                                img_tensor, tau=args.specular_tau
+                            )
                             conf = torch.nn.functional.interpolate(
                                 conf,
                                 size=anomaly_map_final.shape,
-                                mode='bilinear',
-                                align_corners=False
+                                mode="bilinear",
+                                align_corners=False,
                             )
                             conf_map = conf.squeeze().cpu().numpy()
-                            anomaly_map_final = filter_specular_anomalies(anomaly_map_final, conf_map)
+                            anomaly_map_final = (
+                                filter_specular_anomalies(anomaly_map_final, conf_map)
+                                .cpu()
+                                .numpy()
+                            )
 
                         val_scores.extend(anomaly_map_final.flatten())
                 val_iter.update(len(path_batch))
@@ -267,7 +295,7 @@ def main():
         px_true_all, px_pred_all = [], []
         anomalous_gt_masks, anomalous_anomaly_maps = [], []
         vis_saved_count = 0
-        
+
         test_iter = tqdm(test_paths, desc=f"Testing {category}")
         for i in range(0, len(test_paths), args.batch_size):
             path_batch = test_paths[i : i + args.batch_size]
@@ -282,45 +310,24 @@ def main():
                     is_anomaly = is_anomaly_batch[j]
                     path = path_batch[j]
                     pil_img = pil_imgs[j]
-            else:
-                tokens, (h_p, w_p) = extractor.extract_tokens(
-                    pil_imgs,
-                    args.image_res,
-                    layers,
-                    args.agg_method,
-                    grouped_layers,
-                    args.docrop,
-                    is_cosine=(args.score_method == "cosine"),
-                    use_clahe=args.use_clahe,
-                )
-                b, _, c = tokens.shape
-                tokens_reshaped = tokens.reshape(b * h_p * w_p, c)
-
-                scores = calculate_anomaly_scores(
-                    tokens_reshaped,
-                    pca_params,
-                    args.score_method,
-                    args.drop_k,
-                )
-                anomaly_maps = scores.reshape(b, h_p, w_p)
-
-                for j in range(anomaly_maps.shape[0]):
-                    pil_img = pil_imgs[j]
-                    is_anomaly = is_anomaly_batch[j]
-                    path = path_batch[j]
-                    anomaly_map_final = post_process_map(anomaly_maps[j], args.image_res)
 
                     if args.use_specular_filter:
                         img_tensor = TF.to_tensor(pil_img).unsqueeze(0).to(DEVICE)
-                        _, _, conf = specular_mask_torch(img_tensor, tau=args.specular_tau)
+                        _, _, conf = specular_mask_torch(
+                            img_tensor, tau=args.specular_tau
+                        )
                         conf = torch.nn.functional.interpolate(
                             conf,
                             size=anomaly_map_final.shape,
-                            mode='bilinear',
-                            align_corners=False
+                            mode="bilinear",
+                            align_corners=False,
                         )
                         conf_map = conf.squeeze().cpu().numpy()
-                        anomaly_map_final = filter_specular_anomalies(anomaly_map_final, conf_map)
+                        anomaly_map_final = (
+                            filter_specular_anomalies(anomaly_map_final, conf_map)
+                            .cpu()
+                            .numpy()
+                        )
 
                     # Aggregate pixel scores to image score
                     if args.img_score_agg == "max":
@@ -335,10 +342,90 @@ def main():
                     if threshold is not None:
                         img_pred_f1.append(1 if img_score > threshold else 0)
 
-                    if args.patch_size:
-                        gt_mask = handler.get_ground_truth_mask(path, pil_img.size[::-1])
+                    gt_mask = handler.get_ground_truth_mask(path, pil_img.size)
+
+                    px_true_all.extend(gt_mask.flatten())
+                    px_pred_all.extend(anomaly_map_final.flatten())
+
+                    if is_anomaly:
+                        anomalous_gt_masks.append(gt_mask)
+                        anomalous_anomaly_maps.append(anomaly_map_final)
+                        if vis_saved_count < args.vis_count:
+                            save_visualization(
+                                path,
+                                pil_img,
+                                gt_mask,
+                                anomaly_map_final,
+                                args.outdir,
+                                category,
+                                vis_saved_count,
+                            )
+                            vis_saved_count += 1
+            else:
+                tokens, (h_p, w_p) = extractor.extract_tokens(
+                    pil_imgs,
+                    args.image_res,
+                    layers,
+                    args.agg_method,
+                    grouped_layers,
+                    args.docrop,
+                    is_cosine=(args.score_method == "cosine"),
+                    use_clahe=args.use_clahe,
+                )
+                b, _, _, c = tokens.shape
+                tokens_reshaped = tokens.reshape(b * h_p * w_p, c)
+
+                scores = calculate_anomaly_scores(
+                    tokens_reshaped,
+                    pca_params,
+                    args.score_method,
+                    args.drop_k,
+                )
+                anomaly_maps = scores.reshape(b, h_p, w_p)
+
+                for j in range(anomaly_maps.shape[0]):
+                    pil_img = pil_imgs[j]
+                    is_anomaly = is_anomaly_batch[j]
+                    path = path_batch[j]
+                    anomaly_map_final = post_process_map(
+                        anomaly_maps[j], args.image_res
+                    )
+
+                    if args.use_specular_filter:
+                        img_tensor = TF.to_tensor(pil_img).unsqueeze(0).to(DEVICE)
+                        _, _, conf = specular_mask_torch(
+                            img_tensor, tau=args.specular_tau
+                        )
+                        conf = torch.nn.functional.interpolate(
+                            conf,
+                            size=anomaly_map_final.shape,
+                            mode="bilinear",
+                            align_corners=False,
+                        )
+                        conf_map = conf.squeeze().cpu().numpy()
+                        anomaly_map_final = (
+                            filter_specular_anomalies(anomaly_map_final, conf_map)
+                            .cpu()
+                            .numpy()
+                        )
+
+                    # Aggregate pixel scores to image score
+                    if args.img_score_agg == "max":
+                        img_score = np.max(anomaly_map_final)
+                    elif args.img_score_agg == "p99":
+                        img_score = np.percentile(anomaly_map_final, 99)
                     else:
-                        gt_mask = handler.get_ground_truth_mask(path, args.image_res)
+                        img_score = np.mean(anomaly_map_final)
+
+                    img_true.append(1 if is_anomaly else 0)
+                    img_pred_auroc.append(img_score)
+                    if threshold is not None:
+                        img_pred_f1.append(1 if img_score > threshold else 0)
+
+                    gt_mask = handler.get_ground_truth_mask(
+                        path, (args.image_res, args.image_res)
+                    )
+
                     px_true_all.extend(gt_mask.flatten())
                     px_pred_all.extend(anomaly_map_final.flatten())
 
@@ -412,4 +499,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
