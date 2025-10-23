@@ -30,7 +30,7 @@ def get_args():
     parser.add_argument(
         "--model_ckpt",
         type=str,
-        default="facebook/dinov3-vitl16-pretrain-lvd1689m",
+        default="facebook/dinov3-vit7b16-pretrain-lvd1689m",
         help="HuggingFace model checkpoint for feature extraction.",
     )
     parser.add_argument(
@@ -71,7 +71,7 @@ def get_args():
     parser.add_argument(
         "--layers",
         type=str,
-        default="-25,-13,-1",
+        default="-1,-12,-36",
         help="Comma-separated layer indices for 'concat' or 'mean' aggregation.",
     )
     parser.add_argument(

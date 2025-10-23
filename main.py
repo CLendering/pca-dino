@@ -20,7 +20,7 @@ from features import FeatureExtractor
 from pca import PCAModel, KernelPCAModel
 from score import calculate_anomaly_scores, post_process_map
 from viz import save_visualization
-from specular import specular_mask_torch, suppress_specular_fp
+from specular import specular_mask_torch, filter_specular_anomalies
 from patching import process_image_patched, get_patch_coords
 
 # Import the new augmentation function
@@ -405,18 +405,20 @@ def main():
                             img_tensor = (
                                 TF.to_tensor(pil_imgs[j]).unsqueeze(0).to(DEVICE)
                             )
-                            bin_mask, _, _ = specular_mask_torch(
+                            _, _, conf = specular_mask_torch(
                                 img_tensor, tau=args.specular_tau
                             )
-                            bin_mask = torch.nn.functional.interpolate(
-                                bin_mask.float(),
+                            conf = torch.nn.functional.interpolate(
+                                conf,
                                 size=anomaly_map_final.shape,
-                                mode="nearest",
+                                mode="bilinear",
+                                align_corners=False,
                             )
-                            bin_mask = bin_mask > 0
-                            bin_mask = bin_mask.squeeze().cpu()
-                            anomaly_map_final = suppress_specular_fp(
-                                anomaly_map_final, bin_mask
+                            conf_map = conf.squeeze().cpu().numpy()
+                            anomaly_map_final = (
+                                filter_specular_anomalies(anomaly_map_final, conf_map)
+                                .cpu()
+                                .numpy()
                             )
 
                         # image score (mirror test rule)
@@ -500,19 +502,21 @@ def main():
                     pil_img = pil_imgs[j]
 
                     if args.use_specular_filter:
-                        img_tensor = TF.to_tensor(pil_img).unsqueeze(0).to(DEVICE)
-                        bin_mask, _, _ = specular_mask_torch(
+                        img_tensor = TF.to_tensor(pil_imgs[j]).unsqueeze(0).to(DEVICE)
+                        _, _, conf = specular_mask_torch(
                             img_tensor, tau=args.specular_tau
                         )
-                        bin_mask = torch.nn.functional.interpolate(
-                            bin_mask.float(),
+                        conf = torch.nn.functional.interpolate(
+                            conf,
                             size=anomaly_map_final.shape,
-                            mode="nearest",
+                            mode="bilinear",
+                            align_corners=False,
                         )
-                        bin_mask = bin_mask > 0
-                        bin_mask = bin_mask.squeeze().cpu()
-                        anomaly_map_final = suppress_specular_fp(
-                            anomaly_map_final, bin_mask
+                        conf_map = conf.squeeze().cpu().numpy()
+                        anomaly_map_final = (
+                            filter_specular_anomalies(anomaly_map_final, conf_map)
+                            .cpu()
+                            .numpy()
                         )
 
                     # Aggregate pixel scores to image score
@@ -590,19 +594,21 @@ def main():
                     )
 
                     if args.use_specular_filter:
-                        img_tensor = TF.to_tensor(pil_img).unsqueeze(0).to(DEVICE)
-                        bin_mask, _, _ = specular_mask_torch(
+                        img_tensor = TF.to_tensor(pil_imgs[j]).unsqueeze(0).to(DEVICE)
+                        _, _, conf = specular_mask_torch(
                             img_tensor, tau=args.specular_tau
                         )
-                        bin_mask = torch.nn.functional.interpolate(
-                            bin_mask.float(),
+                        conf = torch.nn.functional.interpolate(
+                            conf,
                             size=anomaly_map_final.shape,
-                            mode="nearest",
+                            mode="bilinear",
+                            align_corners=False,
                         )
-                        bin_mask = bin_mask > 0
-                        bin_mask = bin_mask.squeeze().cpu()
-                        anomaly_map_final = suppress_specular_fp(
-                            anomaly_map_final, bin_mask
+                        conf_map = conf.squeeze().cpu().numpy()
+                        anomaly_map_final = (
+                            filter_specular_anomalies(anomaly_map_final, conf_map)
+                            .cpu()
+                            .numpy()
                         )
 
                     # Aggregate pixel scores to image score
