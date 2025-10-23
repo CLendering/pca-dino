@@ -3,3 +3,4 @@ __pycache__/
 datasets/
 .ruff_cache/
 .vscode/
+logs/
