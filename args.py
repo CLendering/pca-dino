@@ -12,7 +12,7 @@ def get_args():
         "--dataset_name",
         type=str,
         required=True,
-        choices=["mvtec_ad", "mvtec_ad2"],
+        choices=["mvtec_ad", "mvtec_ad2", "visa", "blade30"],
         help="Name of the dataset to use.",
     )
     parser.add_argument(
@@ -30,11 +30,11 @@ def get_args():
     parser.add_argument(
         "--model_ckpt",
         type=str,
-        default="facebook/dinov2-base",
+        default="facebook/dinov3-vitl16-pretrain-lvd1689m",
         help="HuggingFace model checkpoint for feature extraction.",
     )
     parser.add_argument(
-        "--image_res", type=int, default=256, help="Image resolution for the model."
+        "--image_res", type=int, default=128, help="Image resolution for the model."
     )
     parser.add_argument(
         "--patch_size",
@@ -52,6 +52,15 @@ def get_args():
     parser.add_argument(
         "--batch_size", type=int, default=8, help="Batch size for feature extraction."
     )
+
+    parser.add_argument(
+        "--k_shot",
+        type=int,
+        default=None,
+        help="""Number of 'good' training images to use (k-shot). 
+        If None, all training images are used.""",
+    )
+
     parser.add_argument(
         "--agg_method",
         type=str,
@@ -62,7 +71,7 @@ def get_args():
     parser.add_argument(
         "--layers",
         type=str,
-        default="-1,-2,-3",
+        default="-25,-13,-1",
         help="Comma-separated layer indices for 'concat' or 'mean' aggregation.",
     )
     parser.add_argument(
@@ -82,6 +91,23 @@ def get_args():
         help="Apply CLAHE to the images.",
     )
 
+    # --- Augmentation Arguments (for k-shot) ---
+    parser.add_argument(
+        "--aug_count",
+        type=int,
+        default=0,
+        help="""Number of augmented samples to generate per k-shot image.
+        Only active if --k_shot is set.""",
+    )
+    parser.add_argument(
+        "--aug_list",
+        type=str,
+        nargs="+",
+        default=["hflip", "rotate", "color_jitter"],
+        help="""List of augmentations to apply. 
+        Choices: hflip, vflip, rotate, color_jitter, affine.""",
+    )
+
     # --- Anomaly Detection (PCA) Arguments ---
     parser.add_argument(
         "--pca_dim",
@@ -92,7 +118,7 @@ def get_args():
     parser.add_argument(
         "--pca_ev",
         type=float,
-        default=0.999,
+        default=0.99,
         help="Explained variance to retain for PCA. Used if --pca_dim is None.",
     )
     parser.add_argument("--whiten", action="store_true", help="Apply whitening in PCA.")
@@ -160,7 +186,7 @@ def get_args():
     parser.add_argument(
         "--specular_size_threshold_factor",
         type=float,
-        default=1.5,
+        default=1.1,
         help="Size threshold factor for filtering specular anomalies.",
     )
 

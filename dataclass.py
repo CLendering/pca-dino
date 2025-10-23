@@ -108,5 +108,23 @@ def get_dataset_handler(name: str, root_path: str, category: str) -> BaseDataset
         return MVTecAD2Dataset(root_path, category)
     elif name == "visa":
         return VisADataset(root_path, category)
+    elif name == "blade30":
+        return Blade30Dataset(root_path, category)
     else:
         raise ValueError(f"Unknown dataset: {name}")
+
+
+class Blade30Dataset(BaseDatasetHandler):
+    """Handler for the original MVTec AD dataset structure."""
+
+    def get_train_paths(self):
+        return sorted(glob.glob(str(self.category_path / "train" / "good" / "*.jpg")))
+
+    def get_test_paths(self):
+        return sorted(glob.glob(str(self.category_path / "test" / "*" / "*.jpg")))
+
+    def get_ground_truth_path(self, test_path: str):
+        p = Path(test_path)
+        return str(
+            self.category_path / "ground_truth" / p.parent.name / f"{p.stem}_mask.png"
+        )

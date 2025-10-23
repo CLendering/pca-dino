@@ -82,7 +82,6 @@ def post_process_map(anomaly_map: np.ndarray, res):
     if isinstance(res, int):
         dsize = (res, res)
     else:
-        # patching.py passes (height, width), cv2 wants (width, height)
         dsize = (res[1], res[0])
     map_resized = cv2.resize(anomaly_map, dsize, interpolation=cv2.INTER_CUBIC)
     return cv2.GaussianBlur(map_resized, (5, 5), 0)

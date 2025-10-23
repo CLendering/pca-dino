@@ -3,5 +3,12 @@ repos:
     rev: v0.6.7
     hooks:
       - id: ruff
-        args: ["--fix"] 
+        name: Ruff (lint + auto-fix)
+        args: ["--fix", "--exit-zero"] 
+        pass_filenames: true
+        always_run: true
+
       - id: ruff-format
+        name: Ruff (format)
+        pass_filenames: true
+        always_run: true
