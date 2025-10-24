@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-import torchvision.transforms.functional as TF
+from args import parse_layer_indices, parse_grouped_layers
 
 from features import FeatureExtractor
 from score import calculate_anomaly_scores, post_process_map
@@ -79,7 +79,11 @@ def process_image_patched(
 
             for j, anomaly_map_patch in enumerate(anomaly_maps_batch):
                 anomaly_map_patch_resized = post_process_map(
-                    anomaly_map_patch, (coord_batch[j][3] - coord_batch[j][1], coord_batch[j][2] - coord_batch[j][0])
+                    anomaly_map_patch,
+                    (
+                        coord_batch[j][3] - coord_batch[j][1],
+                        coord_batch[j][2] - coord_batch[j][0],
+                    ),
                 )
                 x1, y1, x2, y2 = coord_batch[j]
                 anomaly_map_full[y1:y2, x1:x2] += anomaly_map_patch_resized
@@ -87,19 +91,11 @@ def process_image_patched(
 
         # Average the scores in overlapping regions
         anomaly_map_final = np.divide(
-            anomaly_map_full, count_map, out=np.zeros_like(anomaly_map_full), where=count_map != 0
+            anomaly_map_full,
+            count_map,
+            out=np.zeros_like(anomaly_map_full),
+            where=count_map != 0,
         )
         anomaly_maps_final.append(anomaly_map_final)
 
     return anomaly_maps_final
-
-def parse_layer_indices(arg_str: str):
-    """Parses a comma-separated string of integers."""
-    return [int(x.strip()) for x in arg_str.split(",")]
-
-
-def parse_grouped_layers(arg_str: str):
-    """Parses grouped layer indices from format like '-1,-2:-3,-4'."""
-    if not arg_str:
-        return []
-    return [parse_layer_indices(group) for group in arg_str.split(":")]

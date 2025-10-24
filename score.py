@@ -4,13 +4,12 @@ import logging
 
 
 def _kernel_self_dot(X: np.ndarray, kpca) -> np.ndarray:
-    """Calculates the dot product of each sample with itself in kernel space."""
-    if kpca.kernel == "rbf" or kpca.kernel == "cosine":
+    """Compute k(x,x) for several sklearn KPCA kernels."""
+    if kpca.kernel in ("rbf", "cosine"):
         return np.ones(X.shape[0])
     elif kpca.kernel == "linear":
         return np.sum(X**2, axis=1)
     elif kpca.kernel == "poly":
-        # gamma is obtained from the fitted kpca object
         gamma = kpca.gamma if kpca.gamma is not None else 1.0 / X.shape[1]
         return (gamma * np.sum(X**2, axis=1) + kpca.coef0) ** kpca.degree
     elif kpca.kernel == "sigmoid":
@@ -18,70 +17,148 @@ def _kernel_self_dot(X: np.ndarray, kpca) -> np.ndarray:
         return np.tanh(gamma * np.sum(X**2, axis=1) + kpca.coef0)
     else:
         logging.warning(
-            f"Cannot compute k(x,x) for kernel '{kpca.kernel}'. Reconstruction error will be incomplete."
+            f"Cannot compute k(x,x) for kernel '{kpca.kernel}'. Reconstruction error will be approximate."
         )
-        return 0
+        return np.zeros(X.shape[0], dtype=X.dtype)
+
+
+def _row_l2(X: np.ndarray, eps: float) -> np.ndarray:
+    """Normalize rows to unit length."""
+    n = np.linalg.norm(X, axis=1, keepdims=True)
+    return X / (n + eps)
+
+
+def pca_reconstruct(X: np.ndarray, pca: dict, drop_k: int = 0) -> np.ndarray:
+    """Reconstruct X in original space using unscaled components."""
+    mu = np.asarray(pca["mu"], dtype=X.dtype)
+    C = np.asarray(pca["components"][:, : pca["k"]], dtype=X.dtype)
+    X0 = X - mu
+    Z = X0 @ C
+    if drop_k > 0:
+        if drop_k >= Z.shape[1]:
+            Z[:] = 0.0  # All components are "normal", so zero them out
+        else:
+            Z[:, :drop_k] = 0.0  # Zero out the "normal" components
+    X_recon = (Z @ C.T) + mu
+    return X_recon
 
 
 def calculate_anomaly_scores(X: np.ndarray, pca: dict, method: str, drop_k: int = 0):
-    """Calculates anomaly scores using specified PCA method."""
+    """
+    Calculate anomaly scores using PCA/KernelPCA based on reconstruction criteria.
+    Methods:
+      - 'reconstruction': (Default) Squared L2 recon error in original space.
+      - 'mahalanobis'   : Mahalanobis distance (variance-normalized error)
+                          in "abnormal" PC subspace [drop_k...k].
+      - 'euclidean'     : Squared Euclidean distance (absolute error)
+                          in "abnormal" PC subspace [drop_k...k].
+      - 'cosine'        : Angular reconstruction error in original space.
+      - KPCA 'reconstruction' (if 'kpca' in pca)
+    """
+    # --------------------------- Kernel PCA branch ----------------------------
     if "kpca" in pca:
         if method != "reconstruction":
             logging.warning(
-                f"Kernel PCA only supports 'reconstruction' scoring method. Ignoring '{method}'."
+                f"Kernel PCA only supports 'reconstruction' scoring method. Using 'reconstruction'."
             )
 
         scaler = pca["scaler"]
         kpca = pca["kpca"]
         X_scaled = scaler.transform(X)
 
-        # Anomaly score is the reconstruction error in the kernel-induced feature space.
-        # Error = ||phi(x) - proj(phi(x))||^2 = k(x,x) - ||proj(phi(x))||^2
-        X_projected = kpca.transform(X_scaled)
+        X_proj = kpca.transform(X_scaled)
         k_x_x = _kernel_self_dot(X_scaled, kpca)
 
-        # The projection norm is the sum of squares of projected components
-        projection_norm_sq = np.sum(X_projected[:, drop_k:] ** 2, axis=1)
+        if drop_k > 0:
+            if drop_k >= X_proj.shape[1]:
+                X_proj = np.zeros_like(X_proj)  # All components dropped
+            else:
+                X_proj = X_proj[:, drop_k:]
 
-        score = k_x_x - projection_norm_sq
-        # Scores can be negative due to numerical precision, clip at 0.
-        return np.maximum(0, score)
+        proj_norm_sq = np.sum(X_proj**2, axis=1)
+        score = k_x_x - proj_norm_sq
+        return np.maximum(0.0, score)
 
     if drop_k < 0:
         raise ValueError("drop_k must be non-negative.")
     if drop_k >= pca["k"]:
-        raise ValueError(f"drop_k ({drop_k}) cannot be >= num components ({pca['k']}).")
+        logging.warning(f"drop_k ({drop_k}) is >= num components ({pca['k']}).")
+        if method == "mahalanobis" or method == "euclidean":
+            return np.zeros(X.shape[0], dtype=X.dtype)
 
     if method == "reconstruction":
-        W_dropped = pca["W"][:, drop_k:]
-        P_dropped = pca["P"][drop_k:, :]
-        Z_dropped = (X - pca["mu"]) @ W_dropped
-        X_recon = Z_dropped @ P_dropped + pca["mu"]
+        X_recon = pca_reconstruct(X, pca, drop_k=drop_k)
         return np.sum((X - X_recon) ** 2, axis=1)
 
     elif method == "mahalanobis":
-        if drop_k > 0:
-            logging.warning(
-                "drop_k is not supported for Mahalanobis distance. Ignoring."
-            )
-        Z = (X - pca["mu"]) @ pca["W"]
-        return np.einsum("ij,jk,ik->i", Z, pca["cov_Z_inv"], Z)
+        mu = np.asarray(pca["mu"], dtype=X.dtype)
+        C = np.asarray(pca["components"][:, : pca["k"]], dtype=X.dtype)
+        Z = (X - mu) @ C  # [N, k]
+
+        if drop_k >= pca["k"]:
+            return np.zeros(X.shape[0], dtype=X.dtype)
+
+        # We only want the components from drop_k onwards
+        Z_abnormal = Z[:, drop_k:]  # Z is [N, k - drop_k]
+        eigvals_abnormal = np.asarray(pca["eigvals"][drop_k:], dtype=X.dtype)
+
+        # Calculate Mahalanobis distance in this subspace
+        # score = sum( (z_i^2 / lambda_i) ) for i=drop_k...k
+        cov_inv = np.diag(1.0 / (eigvals_abnormal + pca["eps"]))
+        return np.einsum("ij,jk,ik->i", Z_abnormal, cov_inv, Z_abnormal)
+    elif method == "euclidean":
+        mu = np.asarray(pca["mu"], dtype=X.dtype)
+        C = np.asarray(pca["components"][:, : pca["k"]], dtype=X.dtype)
+        Z = (X - mu) @ C  # [N, k]
+
+        if drop_k >= pca["k"]:
+            return np.zeros(X.shape[0], dtype=X.dtype)
+
+        # --- CORRECTED FIX: Use "abnormal" subspace [drop_k...k] ---
+        Z_abnormal = Z[:, drop_k:]  # Z is [N, k - drop_k]
+
+        # Calculate Euclidean distance in this subspace (squared L2 norm)
+        # score = sum( z_i^2 ) for i=drop_k...k
+        return np.sum(Z_abnormal**2, axis=1)
+
+    # ---- Cosine (Angular reconstruction error) ----
     elif method == "cosine":
-        if drop_k > 0:
-            logging.warning("drop_k is not supported for Cosine distance. Ignoring.")
-        # The features are already normalized in the feature extractor
-        X_recon = (X - pca["mu"]) @ pca["W"] @ pca["P"] + pca["mu"]
-        return 1 - np.sum(X * X_recon, axis=1)
+        # 1. Reconstruct X from PCA space
+        X_recon = pca_reconstruct(X, pca, drop_k=drop_k)
+
+        # 2. L2-normalize the original vectors X
+        X_norm = _row_l2(X, pca["eps"])
+
+        # 3. L2-normalize the reconstructed vectors X_recon
+        X_recon_norm = _row_l2(X_recon, pca["eps"])
+
+        # 4. Compute cosine similarity (batched dot product)
+        sim = np.einsum("ij,ij->i", X_norm, X_recon_norm)
+
+        # 5. Score is 1 - similarity. Clip for numerical stability.
+        sim = np.clip(sim, -1.0, 1.0)
+        return 1.0 - sim
 
     else:
         raise ValueError(f"Unknown scoring method '{method}'.")
 
 
 def post_process_map(anomaly_map: np.ndarray, res):
-    """Resizes and blurs the anomaly map."""
-    if isinstance(res, int):
-        dsize = (res, res)
-    else:
-        dsize = (res[1], res[0])
+    """Resize + blur the anomaly map."""
+    # Ensure map is float32 for cv2
+    if anomaly_map.dtype != np.float32:
+        anomaly_map = anomaly_map.astype(np.float32)
+
+    dsize = (res, res) if isinstance(res, int) else (res[1], res[0])
     map_resized = cv2.resize(anomaly_map, dsize, interpolation=cv2.INTER_CUBIC)
-    return cv2.GaussianBlur(map_resized, (3, 3), 0)
+
+    k_size = int(res / 50)
+    if k_size % 2 == 0:
+        k_size += 1
+    k_size = max(3, k_size)
+
+    # Use a sigma scaled to kernel size
+    # A common rule of thumb: sigma = 0.3*((ksize-1)*0.5 - 1) + 0.8
+    sigma = 0.3 * ((k_size - 1) * 0.5 - 1) + 0.8
+
+    return cv2.GaussianBlur(map_resized, (k_size, k_size), sigma)

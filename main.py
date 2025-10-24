@@ -14,7 +14,10 @@ from sklearn.metrics import roc_auc_score, f1_score, precision_recall_curve
 from anomalib.metrics.aupro import _AUPRO as TM_AUPRO
 
 from args import get_args, parse_layer_indices, parse_grouped_layers
-from utils import setup_logging, save_config, min_max_norm
+from utils import (
+    setup_logging,
+    save_config,
+)
 from dataclass import get_dataset_handler
 from features import FeatureExtractor
 from pca import PCAModel, KernelPCAModel
@@ -22,8 +25,6 @@ from score import calculate_anomaly_scores, post_process_map
 from viz import save_visualization
 from specular import specular_mask_torch, filter_specular_anomalies
 from patching import process_image_patched, get_patch_coords
-
-# Import the new augmentation function
 from augmentations import get_augmentation_transform
 
 
@@ -336,7 +337,7 @@ def main():
                 is_anomaly_batch = ["good" not in p for p in path_batch]
 
                 if args.patch_size:
-                    anomaly_maps_final = process_image_patched(
+                    anomaly_maps_batch = process_image_patched(
                         pil_imgs,
                         extractor,
                         pca_params,
@@ -346,19 +347,30 @@ def main():
                         w_p,
                         feature_dim,
                     )
-                    for j, anomaly_map_final in enumerate(anomaly_maps_final):
+                    for j, anomaly_map_final in enumerate(anomaly_maps_batch):
+                        am_min = np.min(anomaly_map_final)
+                        am_max = np.max(anomaly_map_final)
+                        if am_max > am_min:
+                            anomaly_map_normalized = (anomaly_map_final - am_min) / (
+                                am_max - am_min + 1e-8
+                            )
+                        else:
+                            anomaly_map_normalized = np.zeros_like(
+                                anomaly_map_final, dtype=np.float32
+                            )
+
                         # image score (mirror test rule)
                         if args.img_score_agg == "max":
-                            img_score = float(np.max(anomaly_map_final))
+                            img_score = float(np.max(anomaly_map_normalized))
                         elif args.img_score_agg == "p99":
-                            img_score = float(np.percentile(anomaly_map_final, 99))
+                            img_score = float(np.percentile(anomaly_map_normalized, 99))
                         else:
-                            img_score = float(np.mean(anomaly_map_final))
+                            img_score = float(np.mean(anomaly_map_normalized))
                         val_img_scores.append(img_score)
                         val_img_labels.append(1 if is_anomaly_batch[j] else 0)
 
-                        # pixel scores/labels (normalize for F1)
-                        H, W = anomaly_map_final.shape
+                        # pixel scores/labels
+                        H, W = anomaly_map_normalized.shape
                         gt_mask = handler.get_ground_truth_mask(
                             path_batch[j], pil_imgs[j].size
                         )
@@ -372,8 +384,9 @@ def main():
                         )
                         val_px_gts.extend(gt_mask.flatten().astype(np.uint8))
                         val_px_scores.extend(
-                            min_max_norm(anomaly_map_final).flatten().astype(np.float32)
+                            anomaly_map_normalized.flatten().astype(np.float32)
                         )
+
                 else:
                     tokens, (h_p, w_p) = extractor.extract_tokens(
                         pil_imgs,
@@ -420,19 +433,29 @@ def main():
                                 .cpu()
                                 .numpy()
                             )
+                        am_min = np.min(anomaly_map_final)
+                        am_max = np.max(anomaly_map_final)
+                        if am_max > am_min:
+                            anomaly_map_normalized = (anomaly_map_final - am_min) / (
+                                am_max - am_min + 1e-8
+                            )
+                        else:
+                            anomaly_map_normalized = np.zeros_like(
+                                anomaly_map_final, dtype=np.float32
+                            )
 
                         # image score (mirror test rule)
                         if args.img_score_agg == "max":
-                            img_score = float(np.max(anomaly_map_final))
+                            img_score = float(np.max(anomaly_map_normalized))
                         elif args.img_score_agg == "p99":
-                            img_score = float(np.percentile(anomaly_map_final, 99))
+                            img_score = float(np.percentile(anomaly_map_normalized, 99))
                         else:
-                            img_score = float(np.mean(anomaly_map_final))
+                            img_score = float(np.mean(anomaly_map_normalized))
                         val_img_scores.append(img_score)
                         val_img_labels.append(1 if is_anomaly_batch[j] else 0)
 
-                        # pixel scores/labels (normalize for F1)
-                        H, W = anomaly_map_final.shape
+                        # pixel scores/labels
+                        H, W = anomaly_map_normalized.shape
                         gt_mask = handler.get_ground_truth_mask(
                             path_batch[j], (args.image_res, args.image_res)
                         )
@@ -446,18 +469,19 @@ def main():
                         )
                         val_px_gts.extend(gt_mask.flatten().astype(np.uint8))
                         val_px_scores.extend(
-                            min_max_norm(anomaly_map_final).flatten().astype(np.float32)
+                            anomaly_map_normalized.flatten().astype(np.float32)
                         )
                 val_iter.update(len(path_batch))
 
-            target_img_fpr = getattr(args, "target_img_fpr", 0.01)
-            target_px_fpr = getattr(args, "target_px_fpr", 0.001)
+            target_img_fpr = getattr(args, "target_img_fpr", 0.05)
+            target_px_fpr = getattr(args, "target_px_fpr", 0.05)
 
             thr_img, how_img = _pick_threshold_with_fallback(
                 val_img_labels, val_img_scores, target_img_fpr
             )
+            val_px_scores_mm = np.array(val_px_scores)
             thr_px, how_px = _pick_threshold_with_fallback(
-                val_px_gts, val_px_scores, target_px_fpr
+                val_px_gts, val_px_scores_mm, target_px_fpr
             )
 
             if how_img == "none":
@@ -481,10 +505,10 @@ def main():
         # 3. Evaluate on Test Set
         logging.info(f"Evaluating on {len(test_paths)} test images...")
         img_true, img_pred_auroc, img_pred_f1 = [], [], []
-        px_true_all, px_pred_all = [], []
-        px_pred_all_norm = []  # normalized pixel scores for pixel-F1
+        px_true_all, px_pred_all_auroc = [], []
         anomalous_gt_masks, anomalous_anomaly_maps = [], []
         vis_saved_count = 0
+        px_pred_all_normalized = []
 
         test_iter = tqdm(test_paths, desc=f"Testing {category}")
         for i in range(0, len(test_paths), args.batch_size):
@@ -493,10 +517,10 @@ def main():
             is_anomaly_batch = ["good" not in p for p in path_batch]
 
             if args.patch_size:
-                anomaly_maps_final = process_image_patched(
+                anomaly_maps_batch = process_image_patched(
                     pil_imgs, extractor, pca_params, args, DEVICE, h_p, w_p, feature_dim
                 )
-                for j, anomaly_map_final in enumerate(anomaly_maps_final):
+                for j, anomaly_map_final in enumerate(anomaly_maps_batch):
                     is_anomaly = is_anomaly_batch[j]
                     path = path_batch[j]
                     pil_img = pil_imgs[j]
@@ -518,21 +542,31 @@ def main():
                             .cpu()
                             .numpy()
                         )
+                    am_min = np.min(anomaly_map_final)
+                    am_max = np.max(anomaly_map_final)
+                    if am_max > am_min:
+                        anomaly_map_normalized = (anomaly_map_final - am_min) / (
+                            am_max - am_min + 1e-8
+                        )
+                    else:
+                        anomaly_map_normalized = np.zeros_like(
+                            anomaly_map_final, dtype=np.float32
+                        )
 
                     # Aggregate pixel scores to image score
                     if args.img_score_agg == "max":
-                        img_score = np.max(anomaly_map_final)
+                        img_score = np.max(anomaly_map_normalized)
                     elif args.img_score_agg == "p99":
-                        img_score = np.percentile(anomaly_map_final, 99)
+                        img_score = np.percentile(anomaly_map_normalized, 99)
                     else:
-                        img_score = np.mean(anomaly_map_final)
+                        img_score = np.mean(anomaly_map_normalized)
 
                     img_true.append(1 if is_anomaly else 0)
                     img_pred_auroc.append(float(img_score))
                     if thr_img is not None:
                         img_pred_f1.append(1 if img_score >= thr_img else 0)
 
-                    H, W = anomaly_map_final.shape
+                    H, W = anomaly_map_normalized.shape
                     gt_mask = handler.get_ground_truth_mask(path, pil_img.size)
                     gt_mask = (
                         np.array(
@@ -543,21 +577,20 @@ def main():
                         > 127
                     )
 
-                    px_true_all.extend(gt_mask.flatten().astype(np.float32))
-                    px_pred_all.extend(anomaly_map_final.flatten().astype(np.float32))
-                    px_pred_all_norm.extend(
-                        min_max_norm(anomaly_map_final).flatten().astype(np.float32)
+                    px_true_all.extend(gt_mask.flatten().astype(np.uint8))
+                    px_pred_all_normalized.extend(
+                        anomaly_map_normalized.flatten().astype(np.float32)
                     )
 
                     if is_anomaly:
                         anomalous_gt_masks.append(gt_mask)
-                        anomalous_anomaly_maps.append(anomaly_map_final)
+                        anomalous_anomaly_maps.append(anomaly_map_normalized)
                         if vis_saved_count < args.vis_count:
                             save_visualization(
                                 path,
                                 pil_img,
                                 gt_mask,
-                                anomaly_map_final,
+                                anomaly_map_normalized,
                                 args.outdir,
                                 category,
                                 vis_saved_count,
@@ -610,21 +643,31 @@ def main():
                             .cpu()
                             .numpy()
                         )
+                    am_min = np.min(anomaly_map_final)
+                    am_max = np.max(anomaly_map_final)
+                    if am_max > am_min:
+                        anomaly_map_normalized = (anomaly_map_final - am_min) / (
+                            am_max - am_min + 1e-8
+                        )
+                    else:
+                        anomaly_map_normalized = np.zeros_like(
+                            anomaly_map_final, dtype=np.float32
+                        )
 
                     # Aggregate pixel scores to image score
                     if args.img_score_agg == "max":
-                        img_score = np.max(anomaly_map_final)
+                        img_score = np.max(anomaly_map_normalized)
                     elif args.img_score_agg == "p99":
-                        img_score = np.percentile(anomaly_map_final, 99)
+                        img_score = np.percentile(anomaly_map_normalized, 99)
                     else:
-                        img_score = np.mean(anomaly_map_final)
+                        img_score = np.mean(anomaly_map_normalized)
 
                     img_true.append(1 if is_anomaly else 0)
                     img_pred_auroc.append(float(img_score))
                     if thr_img is not None:
                         img_pred_f1.append(1 if img_score >= thr_img else 0)
 
-                    H, W = anomaly_map_final.shape
+                    H, W = anomaly_map_normalized.shape
                     gt_mask = handler.get_ground_truth_mask(
                         path, (args.image_res, args.image_res)
                     )
@@ -637,21 +680,20 @@ def main():
                         > 127
                     )
 
-                    px_true_all.extend(gt_mask.flatten().astype(np.float32))
-                    px_pred_all.extend(anomaly_map_final.flatten().astype(np.float32))
-                    px_pred_all_norm.extend(
-                        min_max_norm(anomaly_map_final).flatten().astype(np.float32)
+                    px_true_all.extend(gt_mask.flatten().astype(np.uint8))
+                    px_pred_all_normalized.extend(
+                        anomaly_map_normalized.flatten().astype(np.float32)
                     )
 
                     if is_anomaly:
                         anomalous_gt_masks.append(gt_mask)
-                        anomalous_anomaly_maps.append(anomaly_map_final)
+                        anomalous_anomaly_maps.append(anomaly_map_normalized)
                         if vis_saved_count < args.vis_count:
                             save_visualization(
                                 path,
                                 pil_img,
                                 gt_mask,
-                                anomaly_map_final,
+                                anomaly_map_normalized,
                                 args.outdir,
                                 category,
                                 vis_saved_count,
@@ -668,27 +710,28 @@ def main():
 
         # Pixel AUROC guard: require both classes present
         px_true_arr = np.array(px_true_all, dtype=np.uint8)
+        px_pred_arr_normalized = np.array(px_pred_all_normalized)
         has_pos = (px_true_arr == 1).any()
         has_neg = (px_true_arr == 0).any()
         px_auroc = (
-            roc_auc_score(px_true_arr, px_pred_all) if (has_pos and has_neg) else 0.0
+            roc_auc_score(px_true_arr, px_pred_arr_normalized)
+            if (has_pos and has_neg)
+            else 0.0
         )
 
+        # Image F1
         img_f1 = f1_score(img_true, img_pred_f1) if (thr_img is not None) else np.nan
         if thr_px is not None and has_pos:
             px_f1 = f1_score(
                 px_true_arr.astype(int),
-                (np.array(px_pred_all_norm) >= thr_px).astype(int),
+                (px_pred_arr_normalized >= thr_px).astype(int),
             )
         else:
             px_f1 = np.nan
-
         if len(anomalous_gt_masks) > 0:
-            # Normalize per-image for AUPRO stability
-            anomalous_anomaly_maps = [min_max_norm(m) for m in anomalous_anomaly_maps]
             preds_np = np.stack(anomalous_anomaly_maps).astype(np.float32)  # [N,H,W]
-            gts_np = np.stack(anomalous_gt_masks)  # [N,H,W], 0/1
-
+            gts_np = np.stack(anomalous_gt_masks).astype(np.uint8)  # [N,H,W]
+            # Shapes/types for anomalib
             preds_t = (
                 torch.from_numpy(preds_np).unsqueeze(1).to(torch.float32).to(DEVICE)
             )  # [N,1,H,W]
@@ -696,7 +739,9 @@ def main():
                 torch.from_numpy(gts_np).unsqueeze(1).to(torch.bool).to(DEVICE)
             )  # [N,1,H,W]
 
-            fpr_cap = getattr(args, "pro_integration_limit", 0.3)
+            fpr_cap = getattr(
+                args, "pro_integration_limit", 0.3
+            )  # e.g., 0.3 or 0.05 per your protocol
             tm_metric = TM_AUPRO(fpr_limit=fpr_cap).to(DEVICE)
             au_pro = tm_metric(preds_t, gts_t).item()
         else:
@@ -709,7 +754,6 @@ def main():
         )
         all_results.append([category, img_auroc, px_auroc, au_pro, img_f1, px_f1])
 
-    # --- Final Report ---
     df = pd.DataFrame(
         all_results,
         columns=[
