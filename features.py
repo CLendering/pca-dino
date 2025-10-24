@@ -109,7 +109,4 @@ class FeatureExtractor:
             else:
                 raise ValueError(f"Unknown aggregation method: '{agg_method}'")
 
-        if is_cosine:
-            fused = torch.nn.functional.normalize(fused, p=2, dim=-1)
-
         return fused.cpu().numpy(), (h_p, w_p)

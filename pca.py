@@ -7,13 +7,10 @@ from sklearn.preprocessing import StandardScaler
 
 
 class KernelPCAModel:
-    """Kernel PCA for anomaly detection using scikit-learn."""
-
-    def __init__(self, k=None, kernel="rbf", gamma=None, whiten=False, eps=1e-6):
+    def __init__(self, k=None, kernel="rbf", gamma=None, eps=1e-6):
         self.k = k
         self.kernel = kernel
         self.gamma = gamma
-        self.whiten = whiten
         self.eps = eps
         self.scaler = None
         self.kpca = None
@@ -30,31 +27,18 @@ class KernelPCAModel:
             n_components=self.k,
             kernel=self.kernel,
             gamma=self.gamma,
-            copy_X=False,
-            # fit_inverse_transform=True, # Needs scikit-learn 0.24+
+            copy_X=False,  # Saves memory by avoiding an extra copy
         )
 
         logging.info(f"Fitting KernelPCA with kernel='{self.kernel}'...")
         self.kpca.fit(features_scaled)
-
-        # In Kernel PCA, reconstruction is not as straightforward as in standard PCA.
-        # The pre-image problem is non-trivial. For anomaly detection, we can
-        # measure the distance in the feature space.
-        # A common method is to calculate the squared distance of a sample
-        # to its projection onto the principal components.
-
-        # For the purpose of this implementation, we will store the fitted model
-        # and the training data features required for transformation.
-        # The actual scoring will need to handle the transformation.
-
         self.pca_params = {
             "scaler": self.scaler,
             "kpca": self.kpca,
             "k": self.k,
-            "whiten": self.whiten,  # Note: Whitening is handled differently in KPCA
             "eps": self.eps,
-            "train_features_scaled": features_scaled,
         }
+
         logging.info("Kernel PCA fit complete.")
         return self.pca_params
 
@@ -135,7 +119,7 @@ class PCAModel:
                 + 1
             )
             logging.info(
-                f"PCA: selected k={self.k} components to explain {self.ev_ratio*100:.2f}% of variance."
+                f"PCA: selected k={self.k} components to explain {self.ev_ratio * 100:.2f}% of variance."
             )
 
         if self.k is None:
@@ -143,24 +127,23 @@ class PCAModel:
         else:
             self.k = min(self.k, evecs.shape[1])
 
-        P = evecs[:, : self.k].T
-        W = evecs[:, : self.k]
-        if self.whiten:
-            W *= 1.0 / torch.sqrt(self.explained_variance_[: self.k] + self.eps)
+        self.components_ = evecs[:, : self.k]  # [D, k], unscaled eigenvectors
+        self.eigvals_ = self.explained_variance_[: self.k]  # [k]
+        self.mu_ = self.mean_
 
         self.pca_params = {
-            "mu": self.mean_.cpu().numpy().astype(np.float64),
-            "W": W.cpu().numpy().astype(np.float64),
-            "P": P.cpu().numpy().astype(np.float64),
-            "evals": self.explained_variance_.cpu().numpy().astype(np.float64),
+            "mu": self.mu_.cpu().numpy().astype(np.float64),  # [D]
+            "components": self.components_.cpu().numpy().astype(np.float64),  # [D, k]
+            "eigvals": self.eigvals_.cpu().numpy().astype(np.float64),  # [k]
+            "sqrt_eig": np.sqrt(
+                self.eigvals_.cpu().numpy().astype(np.float64) + self.eps
+            ),
             "k": self.k,
             "whiten": self.whiten,
             "eps": self.eps,
-            "cov_Z_inv": torch.linalg.inv(
-                torch.diag(self.explained_variance_[: self.k])
-            )
-            .cpu()
-            .numpy()
-            .astype(np.float64),
+            # For Mahalanobis in PC space (unwhitened Z has diag cov = eigvals):
+            "cov_Z_inv": np.diag(
+                1.0 / (self.eigvals_.cpu().numpy().astype(np.float64) + self.eps)
+            ),
         }
         return self.pca_params

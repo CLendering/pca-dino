@@ -148,7 +148,7 @@ def get_args():
         "--score_method",
         type=str,
         default="reconstruction",
-        choices=["reconstruction", "mahalanobis", "cosine"],
+        choices=["reconstruction", "mahalanobis", "cosine", "euclidean"],
         help="Anomaly scoring method.",
     )
     parser.add_argument(

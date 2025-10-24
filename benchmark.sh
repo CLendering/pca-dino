@@ -17,5 +17,3 @@ module load CUDA/12.4.0
 source ~/venvs/anomalib-env/bin/activate
 
 python -u main.py --dataset_name mvtec_ad2 --dataset_path ../anomalib/datasets/MVTec_AD_2/ --patch_size 448 --use_specular_filter
-
-# python -u main.py --dataset_name mvtec_ad2 --dataset_path ../anomalib/datasets/MVTec_AD_2/ --image_res 512 --categories fabric
