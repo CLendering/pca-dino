@@ -114,7 +114,6 @@ def calculate_anomaly_scores(X: np.ndarray, pca: dict, method: str, drop_k: int 
         if drop_k >= pca["k"]:
             return np.zeros(X.shape[0], dtype=X.dtype)
 
-        # --- CORRECTED FIX: Use "abnormal" subspace [drop_k...k] ---
         Z_abnormal = Z[:, drop_k:]  # Z is [N, k - drop_k]
 
         # Calculate Euclidean distance in this subspace (squared L2 norm)
@@ -145,20 +144,20 @@ def calculate_anomaly_scores(X: np.ndarray, pca: dict, method: str, drop_k: int 
 
 def post_process_map(anomaly_map: np.ndarray, res):
     """Resize + blur the anomaly map."""
-    # Ensure map is float32 for cv2
     if anomaly_map.dtype != np.float32:
         anomaly_map = anomaly_map.astype(np.float32)
 
     dsize = (res, res) if isinstance(res, int) else (res[1], res[0])
     map_resized = cv2.resize(anomaly_map, dsize, interpolation=cv2.INTER_CUBIC)
-
-    k_size = int(res / 50)
+    if isinstance(res, int):
+        scalar_res = res
+    else:
+        scalar_res = min(res)
+    k_size = int(scalar_res / 50)
     if k_size % 2 == 0:
         k_size += 1
     k_size = max(3, k_size)
-
-    # Use a sigma scaled to kernel size
-    # A common rule of thumb: sigma = 0.3*((ksize-1)*0.5 - 1) + 0.8
+    # A common rule of thumb:
     sigma = 0.3 * ((k_size - 1) * 0.5 - 1) + 0.8
 
     return cv2.GaussianBlur(map_resized, (k_size, k_size), sigma)
