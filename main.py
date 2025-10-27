@@ -91,6 +91,8 @@ def main():
         run_name += "_spec-filt"
 
     run_name += f"_score-{args.score_method}"
+    run_name += f"_clahe{int(args.use_clahe)}"
+    run_name += f"_dropk{args.drop_k}"
 
     # Add k-shot and augmentation info to run name
     if args.k_shot is not None:
