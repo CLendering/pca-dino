@@ -8,7 +8,7 @@ def _kernel_self_dot(X: np.ndarray, kpca) -> np.ndarray:
     if kpca.kernel in ("rbf", "cosine"):
         return np.ones(X.shape[0])
     elif kpca.kernel == "linear":
-        return np.sum(X**2, axis=1)
+        return np.sum(X**2, axis=1) + kpca.coef0
     elif kpca.kernel == "poly":
         gamma = kpca.gamma if kpca.gamma is not None else 1.0 / X.shape[1]
         return (gamma * np.sum(X**2, axis=1) + kpca.coef0) ** kpca.degree
@@ -73,12 +73,14 @@ def calculate_anomaly_scores(X: np.ndarray, pca: dict, method: str, drop_k: int 
             if drop_k >= X_proj.shape[1]:
                 X_proj = np.zeros_like(X_proj)  # All components dropped
             else:
+                # This logic is correct: error of reconstructing from abnormal components
                 X_proj = X_proj[:, drop_k:]
 
         proj_norm_sq = np.sum(X_proj**2, axis=1)
         score = k_x_x - proj_norm_sq
         return np.maximum(0.0, score)
 
+    # --------------------------- Standard PCA branch --------------------------
     if drop_k < 0:
         raise ValueError("drop_k must be non-negative.")
     if drop_k >= pca["k"]:
@@ -106,6 +108,7 @@ def calculate_anomaly_scores(X: np.ndarray, pca: dict, method: str, drop_k: int 
         # score = sum( (z_i^2 / lambda_i) ) for i=drop_k...k
         cov_inv = np.diag(1.0 / (eigvals_abnormal + pca["eps"]))
         return np.einsum("ij,jk,ik->i", Z_abnormal, cov_inv, Z_abnormal)
+
     elif method == "euclidean":
         mu = np.asarray(pca["mu"], dtype=X.dtype)
         C = np.asarray(pca["components"][:, : pca["k"]], dtype=X.dtype)
@@ -142,17 +145,19 @@ def calculate_anomaly_scores(X: np.ndarray, pca: dict, method: str, drop_k: int 
         raise ValueError(f"Unknown scoring method '{method}'.")
 
 
-def post_process_map(anomaly_map: np.ndarray, res):
+def post_process_map(anomaly_map: np.ndarray, res, blur: bool = True):
     """Resize + blur the anomaly map."""
     if anomaly_map.dtype != np.float32:
         anomaly_map = anomaly_map.astype(np.float32)
 
     dsize = (res, res) if isinstance(res, int) else (res[1], res[0])
-    map_resized = cv2.resize(anomaly_map, dsize, interpolation=cv2.INTER_CUBIC)
+    map_resized = cv2.resize(anomaly_map, dsize, interpolation=cv2.INTER_LINEAR)
+
     if isinstance(res, int):
         scalar_res = res
     else:
         scalar_res = min(res)
+
     k_size = int(scalar_res / 50)
     if k_size % 2 == 0:
         k_size += 1
@@ -160,4 +165,7 @@ def post_process_map(anomaly_map: np.ndarray, res):
     # A common rule of thumb:
     sigma = 0.3 * ((k_size - 1) * 0.5 - 1) + 0.8
 
-    return cv2.GaussianBlur(map_resized, (k_size, k_size), sigma)
+    if blur:
+        return cv2.GaussianBlur(map_resized, (k_size, k_size), sigma)
+    else:
+        return map_resized

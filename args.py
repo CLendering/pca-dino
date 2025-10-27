@@ -34,7 +34,7 @@ def get_args():
         help="HuggingFace model checkpoint for feature extraction.",
     )
     parser.add_argument(
-        "--image_res", type=int, default=128, help="Image resolution for the model."
+        "--image_res", type=int, default=256, help="Image resolution for the model."
     )
     parser.add_argument(
         "--patch_size",
@@ -71,7 +71,7 @@ def get_args():
     parser.add_argument(
         "--layers",
         type=str,
-        default="-1,-12,-36",
+        default="-12,-13,-14,-15,-16",
         help="Comma-separated layer indices for 'concat' or 'mean' aggregation.",
     )
     parser.add_argument(
@@ -186,7 +186,7 @@ def get_args():
     parser.add_argument(
         "--specular_size_threshold_factor",
         type=float,
-        default=1.1,
+        default=1.5,
         help="Size threshold factor for filtering specular anomalies.",
     )
 

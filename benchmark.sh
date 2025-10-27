@@ -4,8 +4,8 @@
 #SBATCH --job-name=grouped_gmm   # job name
 #SBATCH --ntasks=1               # number of tasks
 #SBATCH --cpus-per-task=4        # number of CPU cores
-#SBATCH --mem=64G               # memory per node
-#SBATCH --time=1:00:00          # walltime
+#SBATCH --mem=168G               # memory per node
+#SBATCH --time=2:00:00          # walltime
 #SBATCH --output=logs/out_%j.txt # standard output
 #SBATCH --error=logs/err_%j.txt  # standard error
 
@@ -16,4 +16,5 @@ module load  Python/3.11.3-GCCcore-12.3.0
 module load CUDA/12.4.0
 source ~/venvs/anomalib-env/bin/activate
 
-python -u main.py --dataset_name mvtec_ad --dataset_path ../anomalib/datasets/MVTec --use_specular_filter --image_res 224
+# python -u main.py --dataset_name mvtec_ad2 --dataset_path ../anomalib/datasets/MVTec_AD_2 --use_specular_filter --patch_size 448 --use_clahe
+python -u main.py --dataset_name mvtec_ad --dataset_path ../anomalib/datasets/MVTec --use_specular_filter
