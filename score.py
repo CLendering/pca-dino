@@ -145,27 +145,41 @@ def calculate_anomaly_scores(X: np.ndarray, pca: dict, method: str, drop_k: int 
         raise ValueError(f"Unknown scoring method '{method}'.")
 
 
-def post_process_map(anomaly_map: np.ndarray, res, blur: bool = True):
-    """Resize + blur the anomaly map."""
+def post_process_map(
+    anomaly_map: np.ndarray,
+    res,
+    blur: bool = True,
+    close_holes: bool = False,
+    close_k_size: int = 5,
+):
+    """Resize, blur, and optionally close holes in the anomaly map."""
     if anomaly_map.dtype != np.float32:
         anomaly_map = anomaly_map.astype(np.float32)
 
     dsize = (res, res) if isinstance(res, int) else (res[1], res[0])
     map_resized = cv2.resize(anomaly_map, dsize, interpolation=cv2.INTER_LINEAR)
 
-    if isinstance(res, int):
-        scalar_res = res
-    else:
-        scalar_res = min(res)
+    # --- Morphological closing to fill holes ---
+    if close_holes:
+        if close_k_size % 2 == 0:
+            close_k_size += 1  # Kernel must be odd
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (close_k_size, close_k_size))
+        # Apply closing before blurring to operate on sharper regions
+        map_resized = cv2.morphologyEx(map_resized, cv2.MORPH_CLOSE, kernel)
 
-    k_size = int(scalar_res / 50)
-    if k_size % 2 == 0:
-        k_size += 1
-    k_size = max(3, k_size)
-    # A common rule of thumb:
-    sigma = 0.3 * ((k_size - 1) * 0.5 - 1) + 0.8
-
+    # --- Gaussian blur to smooth ---
     if blur:
+        if isinstance(res, int):
+            scalar_res = res
+        else:
+            scalar_res = min(res)
+
+        k_size = int(scalar_res / 50)
+        if k_size % 2 == 0:
+            k_size += 1
+        k_size = max(3, k_size)
+        sigma = 0.3 * ((k_size - 1) * 0.5 - 1) + 0.8
+
         return cv2.GaussianBlur(map_resized, (k_size, k_size), sigma)
     else:
         return map_resized
