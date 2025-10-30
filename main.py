@@ -10,7 +10,12 @@ import torch
 import torchvision.transforms.functional as TF
 from PIL import Image
 from tqdm import tqdm
-from sklearn.metrics import roc_auc_score, f1_score, precision_recall_curve
+from sklearn.metrics import (
+    roc_auc_score,
+    f1_score,
+    precision_recall_curve,
+    average_precision_score,
+)
 from anomalib.metrics.aupro import _AUPRO as TM_AUPRO
 
 from args import get_args, parse_layer_indices, parse_grouped_layers
@@ -134,7 +139,11 @@ def main():
         categories = args.categories
     else:
         categories = sorted(
-            [f.name for f in Path(args.dataset_path).iterdir() if f.is_dir()]
+            [
+                f.name
+                for f in Path(args.dataset_path).iterdir()
+                if f.is_dir() and f.name != "split_csv"
+            ]
         )
 
     # --- Main Loop ---
@@ -349,7 +358,9 @@ def main():
             for i in range(0, len(val_paths), args.batch_size):
                 path_batch = val_paths[i : i + args.batch_size]
                 pil_imgs = [Image.open(p).convert("RGB") for p in path_batch]
-                is_anomaly_batch = ["good" not in p for p in path_batch]
+                is_anomaly_batch = [
+                    "good" not in p and "Normal" not in p for p in path_batch
+                ]
 
                 if args.patch_size:
                     anomaly_maps_batch = process_image_patched(
@@ -567,7 +578,9 @@ def main():
         for i in range(0, len(test_paths), args.batch_size):
             path_batch = test_paths[i : i + args.batch_size]
             pil_imgs = [Image.open(p).convert("RGB") for p in path_batch]
-            is_anomaly_batch = ["good" not in p for p in path_batch]
+            is_anomaly_batch = [
+                "good" not in str(p) and "Normal" not in str(p) for p in path_batch
+            ]
 
             if args.patch_size:
                 anomaly_maps_batch = process_image_patched(
@@ -826,6 +839,12 @@ def main():
             else np.nan
         )
 
+        img_aupr = (
+            average_precision_score(img_true, img_pred_auroc)
+            if len(np.unique(img_true)) > 1
+            else np.nan
+        )
+
         px_true_arr = np.array(px_true_all, dtype=np.uint8)
         px_pred_arr_auroc = np.array(px_pred_all_auroc)
         px_pred_arr_normalized = np.array(px_pred_all_normalized)
@@ -835,6 +854,12 @@ def main():
         # --- Pixel AUROC (uses RAW scores) ---
         px_auroc = (
             roc_auc_score(px_true_arr, px_pred_arr_auroc)
+            if (has_pos and has_neg)
+            else np.nan
+        )
+
+        px_aupr = (
+            average_precision_score(px_true_arr, px_pred_arr_auroc)
             if (has_pos and has_neg)
             else np.nan
         )
@@ -876,10 +901,13 @@ def main():
 
         # 5. Log and store results
         logging.info(
-            f"{category} Results | I-AUROC: {img_auroc:.4f} | P-AUROC: {px_auroc:.4f} | "
-            f"AU-PRO: {au_pro:.4f} | I-F1: {img_f1:.4f} | P-F1: {px_f1:.4f}"
+            f"{category} Results | I-AUROC: {img_auroc:.4f} | I-AUPR: {img_aupr:.4f} | "
+            f"P-AUROC: {px_auroc:.4f} | P-AUPR: {px_aupr:.4f} | AU-PRO: {au_pro:.4f} | "
+            f"I-F1: {img_f1:.4f} | P-F1: {px_f1:.4f}"
         )
-        all_results.append([category, img_auroc, px_auroc, au_pro, img_f1, px_f1])
+        all_results.append(
+            [category, img_auroc, img_aupr, px_auroc, px_aupr, au_pro, img_f1, px_f1]
+        )
 
     # --- Final Report ---
     df = pd.DataFrame(
@@ -887,7 +915,9 @@ def main():
         columns=[
             "Category",
             "Image AUROC",
+            "Image AUPR",
             "Pixel AUROC",
+            "Pixel AUPR",
             "AU-PRO",
             "Image F1",
             "Pixel F1",

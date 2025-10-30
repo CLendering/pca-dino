@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 import numpy as np
 from PIL import Image
+import pandas as pd
+import logging
 
 
 class BaseDatasetHandler:
@@ -81,23 +83,89 @@ class MVTecAD2Dataset(BaseDatasetHandler):
         )
 
 
-# TODO: Data handeling in metrics will not work for VisA, as there is no 'good'subfolder.
 class VisADataset(BaseDatasetHandler):
-    """Handler for the VisA dataset structure."""
+    """
+    Handler for the VisA dataset structure.
+    This handler relies on a CSV split file located at:
+    {root_path}/split_csv/2cls_fewshot.csv
+    """
+
+    def __init__(self, root_path, category):
+        super().__init__(root_path, category)
+        self.train_paths = []
+        self.test_paths = []
+        self.test_path_to_mask_map = {}
+
+        # The split file is assumed to be in the root_path, parallel to categories
+        split_file = self.root_path / "split_csv" / "2cls_fewshot.csv"
+        if not split_file.exists():
+            logging.error(f"VisA split file not found at: {split_file}")
+            raise FileNotFoundError(f"VisA split file not found at: {split_file}")
+
+        try:
+            df = pd.read_csv(split_file)
+            # Filter for the current category
+            self.df = df[df["object"] == self.category].copy()
+
+            if self.df.empty:
+                logging.warning(
+                    f"No entries found for category '{self.category}' in {split_file}"
+                )
+                return
+
+            # Create absolute paths by joining root_path with relative paths from CSV
+            self.df["image_abs"] = self.df["image"].apply(lambda x: self.root_path / x)
+            self.df["mask_abs"] = self.df["mask"].apply(
+                # Handle empty mask paths (for normal images)
+                lambda x: self.root_path / x if pd.notna(x) and x else None
+            )
+
+            # Get train paths (normal images only)
+            self.train_paths = (
+                self.df[(self.df["split"] == "train") & (self.df["label"] == "normal")][
+                    "image_abs"
+                ]
+                .astype(str)
+                .tolist()
+            )
+
+            # Get test paths (all images labeled 'test')
+            test_df = self.df[self.df["split"] == "test"]
+            self.test_paths = test_df["image_abs"].astype(str).tolist()
+
+            # Create lookup map for test images (image_path -> mask_path)
+            self.test_path_to_mask_map = pd.Series(
+                test_df["mask_abs"].values,
+                index=test_df["image_abs"].astype(str).values,
+            ).to_dict()
+
+            # Sort for consistency
+            self.train_paths.sort()
+            self.test_paths.sort()
+
+        except Exception as e:
+            logging.error(
+                f"Failed to load or process VisA split file {split_file}: {e}"
+            )
+            raise
 
     def get_train_paths(self):
-        return sorted(
-            glob.glob(str(self.category_path / "Data" / "Images" / "Good" / "*.JPG"))
-        )
+        """Returns a list of 'normal' training image paths from the split file."""
+        return self.train_paths
 
     def get_test_paths(self):
-        return sorted(
-            glob.glob(str(self.category_path / "Data" / "Images" / "Anomaly" / "*.JPG"))
-        )
+        """Returns a list of 'test' image paths from the split file."""
+        return self.test_paths
 
     def get_ground_truth_path(self, test_path: str):
-        p = Path(test_path)
-        return str(self.category_path / "Data" / "Masks" / f"{p.stem}.png")
+        """Looks up the mask path for a given test image path."""
+        mask_path = self.test_path_to_mask_map.get(str(test_path))
+
+        # mask_path can be None or pd.NA if the test image is 'normal'
+        if mask_path is None or pd.isna(mask_path):
+            return None
+
+        return str(mask_path)
 
 
 def get_dataset_handler(name: str, root_path: str, category: str) -> BaseDatasetHandler:
