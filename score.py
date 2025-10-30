@@ -59,7 +59,7 @@ def calculate_anomaly_scores(X: np.ndarray, pca: dict, method: str, drop_k: int 
     if "kpca" in pca:
         if method != "reconstruction":
             logging.warning(
-                f"Kernel PCA only supports 'reconstruction' scoring method. Using 'reconstruction'."
+                "Kernel PCA only supports 'reconstruction' scoring method. Using 'reconstruction'."
             )
 
         scaler = pca["scaler"]
