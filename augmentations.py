@@ -19,7 +19,7 @@ def get_augmentation_transform(aug_list: list, image_res: int):
             transforms_list.append(T.RandomVerticalFlip(p=0.5))
             logging.info("Added augmentation: RandomVerticalFlip(p=0.5)")
         elif aug_name == "rotate":
-            transforms_list.append(T.RandomRotation(degrees=15))
+            transforms_list.append(T.RandomRotation(degrees=(0, 315)))
             logging.info("Added augmentation: RandomRotation(degrees=15)")
         elif aug_name == "color_jitter":
             transforms_list.append(
@@ -30,7 +30,7 @@ def get_augmentation_transform(aug_list: list, image_res: int):
             )
         elif aug_name == "affine":
             transforms_list.append(
-                T.RandomAffine(degrees=0, translate=(0.1, 0.1), shear=10)
+                T.RandomAffine(degrees=0, translate=(0.15, 0.15), shear=10)
             )
         else:
             logging.warning(f"Unknown augmentation '{aug_name}' requested. Ignoring.")

@@ -93,6 +93,9 @@ def main():
     run_name += f"_score-{args.score_method}"
     run_name += f"_clahe{int(args.use_clahe)}"
     run_name += f"_dropk{args.drop_k}"
+    run_name += (
+        f"pca_ev{args.pca_ev}" if args.pca_ev is not None else f"_pca_dim{args.pca_dim}"
+    )
 
     # Add k-shot and augmentation info to run name
     if args.k_shot is not None:
@@ -167,7 +170,11 @@ def main():
                     f"--- K-SHOT: Randomly sampling {args.k_shot} training images ---"
                 )
                 random.shuffle(train_paths)
-                train_paths = train_paths[: args.k_shot]
+                train_paths = (
+                    train_paths[: args.k_shot]
+                    if args.k_shot <= len(train_paths)
+                    else train_paths
+                )
                 for i, path in enumerate(train_paths):
                     logging.info(
                         f"  K-Shot image {i + 1}/{args.k_shot}: {Path(path).name}"
@@ -381,6 +388,13 @@ def main():
                             )
 
                         H, W = anomaly_map_normalized.shape
+                        # --- START FIX (Patch): Apply docrop to ground truth ---
+                        # In patching, the GT mask is fetched differently
+                        # The call `handler.get_ground_truth_mask` already takes `pil_imgs[j].size`
+                        # which is the *original* image size, not the patch size.
+                        # `process_image_patched` *returns* a map of the original size.
+                        # So, we just need to resize the full GT to the final anomaly map size.
+                        # *However*, the original code was wrong. It should be:
                         gt_mask = handler.get_ground_truth_mask(
                             path_batch[j], pil_imgs[j].size
                         )
@@ -392,6 +406,8 @@ def main():
                             )
                             > 127
                         )
+                        # --- END FIX (Patch) ---
+
                         val_px_gts.extend(gt_mask.flatten().astype(np.uint8))
                         val_px_scores_normalized.extend(
                             anomaly_map_normalized.flatten().astype(np.float32)
@@ -469,17 +485,36 @@ def main():
                             )
 
                         H, W = anomaly_map_normalized.shape
-                        gt_mask = handler.get_ground_truth_mask(
-                            path_batch[j], (args.image_res, args.image_res)
-                        )
-                        gt_mask = (
-                            np.array(
-                                Image.fromarray(
-                                    (gt_mask.astype(np.uint8) * 255)
-                                ).resize((W, H), resample=Image.NEAREST)
+
+                        # --- START FIX: Apply docrop to ground truth ---
+                        gt_path_str = handler.get_ground_truth_path(path_batch[j])
+
+                        if not gt_path_str or not os.path.exists(gt_path_str):
+                            gt_mask = np.zeros((H, W), dtype=np.uint8)
+                        else:
+                            gt_mask_pil = Image.open(gt_path_str).convert("L")
+
+                            if args.docrop:
+                                # Apply the same resize-then-crop as the feature extractor
+                                resize_res = int(args.image_res / 0.875)
+                                gt_mask_pil = TF.resize(
+                                    gt_mask_pil,
+                                    (resize_res, resize_res),
+                                    interpolation=TF.InterpolationMode.NEAREST,
+                                )
+                                gt_mask_pil = TF.center_crop(
+                                    gt_mask_pil, (args.image_res, args.image_res)
+                                )
+
+                            # Finally, resize to the exact anomaly map shape (W, H)
+                            gt_mask_pil = TF.resize(
+                                gt_mask_pil,
+                                (H, W),  # (H, W)
+                                interpolation=TF.InterpolationMode.NEAREST,
                             )
-                            > 127
-                        )
+                            gt_mask = (np.array(gt_mask_pil) > 0).astype(np.uint8)
+                        # --- END FIX ---
+
                         val_px_gts.extend(gt_mask.flatten().astype(np.uint8))
                         val_px_scores_normalized.extend(
                             anomaly_map_normalized.flatten().astype(np.float32)
@@ -589,6 +624,9 @@ def main():
                         )
 
                     H, W = anomaly_map_normalized.shape
+
+                    # --- START FIX (Patch): Apply docrop to ground truth ---
+                    # Same logic as in the patch validation loop
                     gt_mask = handler.get_ground_truth_mask(path, pil_img.size)
                     gt_mask = (
                         np.array(
@@ -598,6 +636,7 @@ def main():
                         )
                         > 127
                     )
+                    # --- END FIX (Patch) ---
 
                     px_true_all.extend(gt_mask.flatten().astype(np.uint8))
                     # Store RAW scores for P-AUROC
@@ -614,9 +653,16 @@ def main():
                         # Store NORMALIZED map for AUPRO
                         anomalous_anomaly_maps.append(anomaly_map_normalized)
                         if vis_saved_count < args.vis_count:
+                            # --- START VIZ FIX (Patch): No crop needed here ---
+                            # In patch mode, pil_img is the *full* original image,
+                            # and anomaly_map_normalized is *also* the full size.
+                            # The 'zoomed-in' issue only applies to full-image mode.
+                            vis_img = pil_img
+                            # --- END VIZ FIX (Patch) ---
+
                             save_visualization(
                                 path,
-                                pil_img,
+                                vis_img,
                                 gt_mask,
                                 anomaly_map_normalized,  # Use normalized for viz
                                 args.outdir,
@@ -700,17 +746,35 @@ def main():
                         )
 
                     H, W = anomaly_map_normalized.shape
-                    gt_mask = handler.get_ground_truth_mask(
-                        path, (args.image_res, args.image_res)
-                    )
-                    gt_mask = (
-                        np.array(
-                            Image.fromarray(gt_mask.astype(np.uint8) * 255).resize(
-                                (W, H), resample=Image.NEAREST
+
+                    # --- START FIX: Apply docrop to ground truth ---
+                    gt_path_str = handler.get_ground_truth_path(path)
+
+                    if not gt_path_str or not os.path.exists(gt_path_str):
+                        gt_mask = np.zeros((H, W), dtype=np.uint8)
+                    else:
+                        gt_mask_pil = Image.open(gt_path_str).convert("L")
+
+                        if args.docrop:
+                            # Apply the same resize-then-crop as the feature extractor
+                            resize_res = int(args.image_res / 0.875)
+                            gt_mask_pil = TF.resize(
+                                gt_mask_pil,
+                                (resize_res, resize_res),
+                                interpolation=TF.InterpolationMode.NEAREST,
                             )
+                            gt_mask_pil = TF.center_crop(
+                                gt_mask_pil, (args.image_res, args.image_res)
+                            )
+
+                        # Finally, resize to the exact anomaly map shape (W, H)
+                        gt_mask_pil = TF.resize(
+                            gt_mask_pil,
+                            (H, W),  # (H, W)
+                            interpolation=TF.InterpolationMode.NEAREST,
                         )
-                        > 127
-                    )
+                        gt_mask = (np.array(gt_mask_pil) > 0).astype(np.uint8)
+                    # --- END FIX ---
 
                     px_true_all.extend(gt_mask.flatten().astype(np.uint8))
                     # Store RAW scores for P-AUROC
@@ -727,10 +791,24 @@ def main():
                         # Store NORMALIZED map for AUPRO
                         anomalous_anomaly_maps.append(anomaly_map_normalized)
                         if vis_saved_count < args.vis_count:
+                            # --- START VIZ FIX: Crop image for visualization ---
+                            vis_img = pil_img  # This is pil_imgs[j]
+                            if args.docrop:
+                                resize_res = int(args.image_res / 0.875)
+                                vis_img = TF.resize(
+                                    vis_img,
+                                    (resize_res, resize_res),
+                                    interpolation=TF.InterpolationMode.BICUBIC,
+                                )
+                                vis_img = TF.center_crop(
+                                    vis_img, (args.image_res, args.image_res)
+                                )
+                            # --- END VIZ FIX ---
+
                             save_visualization(
                                 path,
-                                pil_img,
-                                gt_mask,
+                                vis_img,  # Pass the (potentially) cropped image
+                                gt_mask,  # This mask is already fixed
                                 anomaly_map_normalized,  # Use normalized for viz
                                 args.outdir,
                                 category,

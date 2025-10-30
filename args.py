@@ -64,14 +64,14 @@ def get_args():
     parser.add_argument(
         "--agg_method",
         type=str,
-        default="concat",
+        default="mean",
         choices=["concat", "mean", "group"],
         help="Feature aggregation method across layers.",
     )
     parser.add_argument(
         "--layers",
         type=str,
-        default="-12,-13,-14,-15,-16",
+        default="-12,-13,-14,-15,-16,-17,-18",
         help="Comma-separated layer indices for 'concat' or 'mean' aggregation.",
     )
     parser.add_argument(
@@ -103,7 +103,7 @@ def get_args():
         "--aug_list",
         type=str,
         nargs="+",
-        default=["hflip", "rotate", "color_jitter"],
+        default=["rotate"],
         help="""List of augmentations to apply. 
         Choices: hflip, vflip, rotate, color_jitter, affine.""",
     )
@@ -160,7 +160,7 @@ def get_args():
     parser.add_argument(
         "--img_score_agg",
         type=str,
-        default="p99",
+        default="max",
         choices=["max", "mean", "p99"],
         help="Aggregation for image-level scores from pixel maps.",
     )
