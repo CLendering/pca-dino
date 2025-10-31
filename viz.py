@@ -2,6 +2,7 @@ from PIL import Image
 import numpy as np
 import cv2
 import os
+from typing import Optional
 
 
 def save_visualization(
@@ -12,6 +13,7 @@ def save_visualization(
     outdir: str,
     category: str,
     vis_idx: int,
+    saliency_mask: Optional[np.ndarray] = None,
 ):
     """Saves a multi-panel visualization of an anomaly."""
 
@@ -21,7 +23,6 @@ def save_visualization(
         cv2.normalize(anom_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U),
         cv2.COLORMAP_JET,
     )
-    overlay = cv2.addWeighted(img_np, 0.6, heatmap, 0.4, 0)
 
     if gt_mask.shape != anom_map.shape:
         print(
@@ -50,7 +51,15 @@ def save_visualization(
     panel1 = add_text(img_np, "Original")
     panel2 = add_text(gt_mask_vis, "Ground Truth")
     panel3 = add_text(heatmap, "Anomaly Map")
-    panel4 = add_text(overlay, "Overlay")
+
+    if saliency_mask is not None:
+        # Normalize saliency mask for visualization
+        saliency_mask_vis = (saliency_mask * 255).astype(np.uint8)
+        saliency_mask_vis = cv2.cvtColor(saliency_mask_vis, cv2.COLOR_GRAY2RGB)
+        panel4 = add_text(saliency_mask_vis, "Saliency Mask (FG)")
+    else:
+        overlay = cv2.addWeighted(img_np, 0.6, heatmap, 0.4, 0)
+        panel4 = add_text(overlay, "Overlay")
 
     combined_img = np.vstack([np.hstack([panel1, panel2]), np.hstack([panel3, panel4])])
 

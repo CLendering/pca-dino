@@ -1,6 +1,6 @@
 import numpy as np
 from args import parse_layer_indices, parse_grouped_layers
-
+import logging
 from features import FeatureExtractor
 from score import calculate_anomaly_scores, post_process_map
 
@@ -41,6 +41,8 @@ def process_image_patched(
 ):
     """Processes a batch of images in patches and returns a list of stitched anomaly maps."""
     anomaly_maps_final = []
+    saliency_maps_final = []  # Store stitched saliency maps
+
     for pil_img in pil_imgs:
         img_width, img_height = pil_img.size
         patch_coords = get_patch_coords(
@@ -50,12 +52,15 @@ def process_image_patched(
         anomaly_map_full = np.zeros((img_height, img_width), dtype=np.float32)
         count_map = np.zeros((img_height, img_width), dtype=np.float32)
 
+        saliency_map_full = np.zeros((img_height, img_width), dtype=np.float32)
+        s_count_map = np.zeros((img_height, img_width), dtype=np.float32)
+
         # Process patches in batches
         for i in range(0, len(patch_coords), args.batch_size):
             coord_batch = patch_coords[i : i + args.batch_size]
             patch_batch = [pil_img.crop(c) for c in coord_batch]
 
-            tokens, _ = extractor.extract_tokens(
+            tokens, _, saliency_masks_batch = extractor.extract_tokens(
                 patch_batch,
                 args.image_res,
                 parse_layer_indices(args.layers),
@@ -66,6 +71,7 @@ def process_image_patched(
                 args.docrop,
                 is_cosine=(args.score_method == "cosine"),
                 use_clahe=args.use_clahe,
+                saliency_layer=args.saliency_layer,  # Pass the argument
             )
 
             scores = calculate_anomaly_scores(
@@ -75,6 +81,18 @@ def process_image_patched(
                 args.drop_k,
             )
             anomaly_maps_batch = scores.reshape(len(patch_batch), h_p, w_p)
+
+            if args.remove_bg:
+                # Use percentile threshold across the whole batch of patches
+                try:
+                    threshold = np.percentile(
+                        saliency_masks_batch, args.saliency_threshold * 100
+                    )
+                    background_mask = saliency_masks_batch < threshold
+                    anomaly_maps_batch[background_mask] = 0.0  # Zero out background
+                except IndexError:
+                    logging.warning("Saliency mask percentile calculation failed. Skipping background removal for this batch.")
+
 
             for j, anomaly_map_patch in enumerate(anomaly_maps_batch):
                 anomaly_map_patch_resized = post_process_map(
@@ -88,6 +106,19 @@ def process_image_patched(
                 anomaly_map_full[y1:y2, x1:x2] += anomaly_map_patch_resized
                 count_map[y1:y2, x1:x2] += 1
 
+                # Stitch saliency map
+                saliency_map_patch = saliency_masks_batch[j]
+                saliency_map_patch_resized = post_process_map(
+                    saliency_map_patch,
+                    (
+                        coord_batch[j][3] - coord_batch[j][1],
+                        coord_batch[j][2] - coord_batch[j][0],
+                    ),
+                    blur=False,  # Don't blur a mask
+                )
+                saliency_map_full[y1:y2, x1:x2] += saliency_map_patch_resized
+                s_count_map[y1:y2, x1:x2] += 1
+
         # Average the scores in overlapping regions
         anomaly_map_final = np.divide(
             anomaly_map_full,
@@ -97,4 +128,12 @@ def process_image_patched(
         )
         anomaly_maps_final.append(anomaly_map_final)
 
-    return anomaly_maps_final
+        saliency_map_final = np.divide(
+            saliency_map_full,
+            s_count_map,
+            out=np.zeros_like(saliency_map_full),
+            where=s_count_map != 0,
+        )
+        saliency_maps_final.append(saliency_map_final)
+
+    return anomaly_maps_final, saliency_maps_final

@@ -22,6 +22,7 @@ from args import get_args, parse_layer_indices, parse_grouped_layers
 from utils import (
     setup_logging,
     save_config,
+    min_max_norm,  # Import min_max_norm
 )
 from dataclass import get_dataset_handler
 from features import FeatureExtractor
@@ -94,6 +95,8 @@ def main():
         run_name += f"_kpca-{args.kernel_pca_kernel}"
     if args.use_specular_filter:
         run_name += "_spec-filt"
+    if args.remove_bg:
+        run_name += f"_rmbg{args.saliency_threshold}_L{args.saliency_layer}" # Show layer in name
 
     run_name += f"_score-{args.score_method}"
     run_name += f"_clahe{int(args.use_clahe)}"
@@ -101,7 +104,7 @@ def main():
     run_name += (
         f"pca_ev{args.pca_ev}" if args.pca_ev is not None else f"_pca_dim{args.pca_dim}"
     )
-    run_name += f"i-score{args.img_score_agg}"
+    run_name += f"_i-score{args.img_score_agg}"
 
     # Add k-shot and augmentation info to run name
     if args.k_shot is not None:
@@ -195,7 +198,7 @@ def main():
             # --- PCA on Patches ---
             temp_img = Image.open(train_paths[0]).convert("RGB")
             temp_patch = temp_img.crop((0, 0, args.patch_size, args.patch_size))
-            temp_tokens, (h_p, w_p) = extractor.extract_tokens(
+            temp_tokens, (h_p, w_p), _ = extractor.extract_tokens(
                 [temp_patch],
                 args.image_res,
                 layers,
@@ -204,6 +207,7 @@ def main():
                 args.docrop,
                 is_cosine=(args.score_method == "cosine"),
                 use_clahe=args.use_clahe,
+                saliency_layer=args.saliency_layer,
             )
             feature_dim = temp_tokens.shape[-1]
             tokens_per_patch = h_p * w_p
@@ -252,7 +256,11 @@ def main():
                         for i in range(0, len(patch_coords), args.batch_size):
                             coord_batch = patch_coords[i : i + args.batch_size]
                             patch_batch = [img.crop(c) for c in coord_batch]
-                            tokens_batch, _ = extractor.extract_tokens(
+                            (
+                                tokens_batch,
+                                _,
+                                saliency_masks_batch,
+                            ) = extractor.extract_tokens(
                                 patch_batch,
                                 args.image_res,
                                 layers,
@@ -261,15 +269,37 @@ def main():
                                 args.docrop,
                                 is_cosine=(args.score_method == "cosine"),
                                 use_clahe=args.use_clahe,
+                                saliency_layer=args.saliency_layer,
                             )
-                            yield tokens_batch.reshape(-1, feature_dim)
+                            tokens_flat = tokens_batch.reshape(-1, feature_dim)
+
+                            if args.remove_bg:
+                                masks_flat = saliency_masks_batch.reshape(-1)
+                                try:
+                                    threshold = np.percentile(
+                                        masks_flat, args.saliency_threshold * 100
+                                    )
+                                    foreground_tokens = tokens_flat[masks_flat >= threshold]
+
+                                    if foreground_tokens.shape[0] > 0:
+                                        yield foreground_tokens
+                                    else:
+                                        logging.warning(
+                                            "No foreground patch tokens found. Yielding all tokens."
+                                        )
+                                        yield tokens_flat
+                                except IndexError:
+                                    logging.warning("Percentile calculation failed. Yielding all tokens.")
+                                    yield tokens_flat
+                            else:
+                                yield tokens_flat
 
             feature_generator = feature_generator_patched
 
         else:
             # --- PCA on Full Images ---
             temp_img = Image.open(train_paths[0]).convert("RGB")
-            temp_tokens, (h_p, w_p) = extractor.extract_tokens(
+            temp_tokens, (h_p, w_p), _ = extractor.extract_tokens(
                 [temp_img],
                 args.image_res,
                 layers,
@@ -278,6 +308,7 @@ def main():
                 args.docrop,
                 is_cosine=(args.score_method == "cosine"),
                 use_clahe=args.use_clahe,
+                saliency_layer=args.saliency_layer,
             )
             feature_dim = temp_tokens.shape[-1]
 
@@ -305,7 +336,11 @@ def main():
                 # Now process all_imgs_to_process in batches
                 for i in range(0, len(all_imgs_to_process), args.batch_size):
                     img_batch = all_imgs_to_process[i : i + args.batch_size]
-                    tokens_batch, _ = extractor.extract_tokens(
+                    (
+                        tokens_batch,
+                        _,
+                        saliency_masks_batch,
+                    ) = extractor.extract_tokens(
                         img_batch,
                         args.image_res,
                         layers,
@@ -314,8 +349,30 @@ def main():
                         args.docrop,
                         is_cosine=(args.score_method == "cosine"),
                         use_clahe=args.use_clahe,
+                        saliency_layer=args.saliency_layer,
                     )
-                    yield tokens_batch.reshape(-1, feature_dim)
+                    tokens_flat = tokens_batch.reshape(-1, feature_dim)
+
+                    if args.remove_bg:
+                        masks_flat = saliency_masks_batch.reshape(-1)
+                        try:
+                            threshold = np.percentile(
+                                masks_flat, args.saliency_threshold * 100
+                            )
+                            foreground_tokens = tokens_flat[masks_flat >= threshold]
+
+                            if foreground_tokens.shape[0] > 0:
+                                yield foreground_tokens
+                            else:
+                                logging.warning(
+                                    "No foreground tokens found. Yielding all tokens."
+                                )
+                                yield tokens_flat
+                        except IndexError:
+                            logging.warning("Percentile calculation failed. Yielding all tokens.")
+                            yield tokens_flat
+                    else:
+                        yield tokens_flat
 
             num_batches = math.ceil(total_train_images / args.batch_size)
             feature_generator = feature_generator_full
@@ -364,7 +421,7 @@ def main():
                 ]
 
                 if args.patch_size:
-                    anomaly_maps_batch = process_image_patched(
+                    anomaly_maps_batch, _ = process_image_patched(
                         pil_imgs,
                         extractor,
                         pca_params,
@@ -388,25 +445,9 @@ def main():
 
                         # --- PIXEL METRICS (AUPRO, P-F1) ---
                         # Use PER-IMAGE NORMALIZED map
-                        am_min = np.min(anomaly_map_final)
-                        am_max = np.max(anomaly_map_final)
-                        if am_max > am_min:
-                            anomaly_map_normalized = (anomaly_map_final - am_min) / (
-                                am_max - am_min + 1e-8
-                            )
-                        else:
-                            anomaly_map_normalized = np.zeros_like(
-                                anomaly_map_final, dtype=np.float32
-                            )
+                        anomaly_map_normalized = min_max_norm(anomaly_map_final)
 
                         H, W = anomaly_map_normalized.shape
-                        # --- START FIX (Patch): Apply docrop to ground truth ---
-                        # In patching, the GT mask is fetched differently
-                        # The call `handler.get_ground_truth_mask` already takes `pil_imgs[j].size`
-                        # which is the *original* image size, not the patch size.
-                        # `process_image_patched` *returns* a map of the original size.
-                        # So, we just need to resize the full GT to the final anomaly map size.
-                        # *However*, the original code was wrong. It should be:
                         gt_mask = handler.get_ground_truth_mask(
                             path_batch[j], pil_imgs[j].size
                         )
@@ -418,7 +459,6 @@ def main():
                             )
                             > 127
                         )
-                        # --- END FIX (Patch) ---
 
                         val_px_gts.extend(gt_mask.flatten().astype(np.uint8))
                         val_px_scores_normalized.extend(
@@ -426,7 +466,11 @@ def main():
                         )
 
                 else:
-                    tokens, (h_p, w_p) = extractor.extract_tokens(
+                    (
+                        tokens,
+                        (h_p, w_p),
+                        saliency_masks_batch,
+                    ) = extractor.extract_tokens(
                         pil_imgs,
                         args.image_res,
                         layers,
@@ -435,6 +479,7 @@ def main():
                         args.docrop,
                         is_cosine=(args.score_method == "cosine"),
                         use_clahe=args.use_clahe,
+                        saliency_layer=args.saliency_layer,
                     )
                     b, _, _, c = tokens.shape
                     tokens_reshaped = tokens.reshape(b * h_p * w_p, c)
@@ -446,6 +491,20 @@ def main():
                         args.drop_k,
                     )
                     anomaly_maps = scores.reshape(b, h_p, w_p)
+
+                    if args.remove_bg:
+                        # Use percentile threshold across the whole batch
+                        try:
+                            threshold = np.percentile(
+                                saliency_masks_batch, args.saliency_threshold * 100
+                            )
+                            background_mask = saliency_masks_batch < threshold
+                            anomaly_maps[
+                                background_mask
+                            ] = 0.0  # Zero out background scores
+                        except IndexError:
+                             logging.warning("Saliency mask percentile calculation failed. Skipping background removal for this batch.")
+
 
                     for j in range(anomaly_maps.shape[0]):
                         anomaly_map_final = post_process_map(
@@ -485,20 +544,10 @@ def main():
 
                         # --- PIXEL METRICS (AUPRO, P-F1) ---
                         # Use PER-IMAGE NORMALIZED map
-                        am_min = np.min(anomaly_map_final)
-                        am_max = np.max(anomaly_map_final)
-                        if am_max > am_min:
-                            anomaly_map_normalized = (anomaly_map_final - am_min) / (
-                                am_max - am_min + 1e-8
-                            )
-                        else:
-                            anomaly_map_normalized = np.zeros_like(
-                                anomaly_map_final, dtype=np.float32
-                            )
-
+                        anomaly_map_normalized = min_max_norm(anomaly_map_final)
                         H, W = anomaly_map_normalized.shape
 
-                        # --- START FIX: Apply docrop to ground truth ---
+                        # --- Ground Truth Mask Handling ---
                         gt_path_str = handler.get_ground_truth_path(path_batch[j])
 
                         if not gt_path_str or not os.path.exists(gt_path_str):
@@ -507,7 +556,6 @@ def main():
                             gt_mask_pil = Image.open(gt_path_str).convert("L")
 
                             if args.docrop:
-                                # Apply the same resize-then-crop as the feature extractor
                                 resize_res = int(args.image_res / 0.875)
                                 gt_mask_pil = TF.resize(
                                     gt_mask_pil,
@@ -518,14 +566,12 @@ def main():
                                     gt_mask_pil, (args.image_res, args.image_res)
                                 )
 
-                            # Finally, resize to the exact anomaly map shape (W, H)
                             gt_mask_pil = TF.resize(
                                 gt_mask_pil,
-                                (H, W),  # (H, W)
+                                (H, W),
                                 interpolation=TF.InterpolationMode.NEAREST,
                             )
                             gt_mask = (np.array(gt_mask_pil) > 0).astype(np.uint8)
-                        # --- END FIX ---
 
                         val_px_gts.extend(gt_mask.flatten().astype(np.uint8))
                         val_px_scores_normalized.extend(
@@ -584,13 +630,17 @@ def main():
             ]
 
             if args.patch_size:
-                anomaly_maps_batch = process_image_patched(
+                (
+                    anomaly_maps_batch,
+                    saliency_maps_batch,
+                ) = process_image_patched(
                     pil_imgs, extractor, pca_params, args, DEVICE, h_p, w_p, feature_dim
                 )
                 for j, anomaly_map_final in enumerate(anomaly_maps_batch):
                     is_anomaly = is_anomaly_batch[j]
                     path = path_batch[j]
                     pil_img = pil_imgs[j]
+                    saliency_map_final = saliency_maps_batch[j]
 
                     if args.use_specular_filter:
                         img_tensor = TF.to_tensor(pil_imgs[j]).unsqueeze(0).to(DEVICE)
@@ -611,7 +661,6 @@ def main():
                         )
 
                     # --- IMAGE METRICS (I-AUROC, I-F1) ---
-                    # Use RAW map for global score
                     if args.img_score_agg == "max":
                         img_score = np.max(anomaly_map_final)
                     elif args.img_score_agg == "p99":
@@ -625,22 +674,9 @@ def main():
                         img_pred_f1.append(1 if img_score >= thr_img else 0)
 
                     # --- PIXEL METRICS (AUPRO, P-F1) ---
-                    # Use PER-IMAGE NORMALIZED map
-                    am_min = np.min(anomaly_map_final)
-                    am_max = np.max(anomaly_map_final)
-                    if am_max > am_min:
-                        anomaly_map_normalized = (anomaly_map_final - am_min) / (
-                            am_max - am_min + 1e-8
-                        )
-                    else:
-                        anomaly_map_normalized = np.zeros_like(
-                            anomaly_map_final, dtype=np.float32
-                        )
-
+                    anomaly_map_normalized = min_max_norm(anomaly_map_final)
                     H, W = anomaly_map_normalized.shape
 
-                    # --- START FIX (Patch): Apply docrop to ground truth ---
-                    # Same logic as in the patch validation loop
                     gt_mask = handler.get_ground_truth_mask(path, pil_img.size)
                     gt_mask = (
                         np.array(
@@ -650,42 +686,41 @@ def main():
                         )
                         > 127
                     )
-                    # --- END FIX (Patch) ---
 
                     px_true_all.extend(gt_mask.flatten().astype(np.uint8))
-                    # Store RAW scores for P-AUROC
                     px_pred_all_auroc.extend(
                         anomaly_map_final.flatten().astype(np.float32)
                     )
-                    # Store NORMALIZED scores for P-F1
                     px_pred_all_normalized.extend(
                         anomaly_map_normalized.flatten().astype(np.float32)
                     )
 
                     if is_anomaly:
                         anomalous_gt_masks.append(gt_mask)
-                        # Store NORMALIZED map for AUPRO
                         anomalous_anomaly_maps.append(anomaly_map_normalized)
                         if vis_saved_count < args.vis_count:
-                            # --- START VIZ FIX (Patch): No crop needed here ---
-                            # In patch mode, pil_img is the *full* original image,
-                            # and anomaly_map_normalized is *also* the full size.
-                            # The 'zoomed-in' issue only applies to full-image mode.
                             vis_img = pil_img
-                            # --- END VIZ FIX (Patch) ---
+                            saliency_map_normalized = min_max_norm(saliency_map_final)
 
                             save_visualization(
                                 path,
                                 vis_img,
                                 gt_mask,
-                                anomaly_map_normalized,  # Use normalized for viz
+                                anomaly_map_normalized,
                                 args.outdir,
                                 category,
                                 vis_saved_count,
+                                saliency_mask=saliency_map_normalized
+                                if args.remove_bg
+                                else None,
                             )
                             vis_saved_count += 1
             else:
-                tokens, (h_p, w_p) = extractor.extract_tokens(
+                (
+                    tokens,
+                    (h_p, w_p),
+                    saliency_masks_batch,
+                ) = extractor.extract_tokens(
                     pil_imgs,
                     args.image_res,
                     layers,
@@ -694,6 +729,7 @@ def main():
                     args.docrop,
                     is_cosine=(args.score_method == "cosine"),
                     use_clahe=args.use_clahe,
+                    saliency_layer=args.saliency_layer,
                 )
                 b, _, _, c = tokens.shape
                 tokens_reshaped = tokens.reshape(b * h_p * w_p, c)
@@ -706,10 +742,26 @@ def main():
                 )
                 anomaly_maps = scores.reshape(b, h_p, w_p)
 
+                if args.remove_bg:
+                    # Use percentile threshold across the whole batch
+                    try:
+                        threshold = np.percentile(
+                            saliency_masks_batch, args.saliency_threshold * 100
+                        )
+                        background_mask = saliency_masks_batch < threshold
+                        anomaly_maps[
+                            background_mask
+                        ] = 0.0  # Zero out background scores
+                    except IndexError:
+                        logging.warning("Saliency mask percentile calculation failed. Skipping background removal for this batch.")
+
+
                 for j in range(anomaly_maps.shape[0]):
                     pil_img = pil_imgs[j]
                     is_anomaly = is_anomaly_batch[j]
                     path = path_batch[j]
+                    saliency_map_patch = saliency_masks_batch[j]
+
                     anomaly_map_final = post_process_map(
                         anomaly_maps[j], args.image_res
                     )
@@ -733,7 +785,6 @@ def main():
                         )
 
                     # --- IMAGE METRICS (I-AUROC, I-F1) ---
-                    # Use RAW map for global score
                     if args.img_score_agg == "max":
                         img_score = np.max(anomaly_map_final)
                     elif args.img_score_agg == "p99":
@@ -747,21 +798,10 @@ def main():
                         img_pred_f1.append(1 if img_score >= thr_img else 0)
 
                     # --- PIXEL METRICS (AUPRO, P-F1) ---
-                    # Use PER-IMAGE NORMALIZED map
-                    am_min = np.min(anomaly_map_final)
-                    am_max = np.max(anomaly_map_final)
-                    if am_max > am_min:
-                        anomaly_map_normalized = (anomaly_map_final - am_min) / (
-                            am_max - am_min + 1e-8
-                        )
-                    else:
-                        anomaly_map_normalized = np.zeros_like(
-                            anomaly_map_final, dtype=np.float32
-                        )
-
+                    anomaly_map_normalized = min_max_norm(anomaly_map_final)
                     H, W = anomaly_map_normalized.shape
 
-                    # --- START FIX: Apply docrop to ground truth ---
+                    # --- Ground Truth Mask Handling ---
                     gt_path_str = handler.get_ground_truth_path(path)
 
                     if not gt_path_str or not os.path.exists(gt_path_str):
@@ -770,7 +810,6 @@ def main():
                         gt_mask_pil = Image.open(gt_path_str).convert("L")
 
                         if args.docrop:
-                            # Apply the same resize-then-crop as the feature extractor
                             resize_res = int(args.image_res / 0.875)
                             gt_mask_pil = TF.resize(
                                 gt_mask_pil,
@@ -781,32 +820,26 @@ def main():
                                 gt_mask_pil, (args.image_res, args.image_res)
                             )
 
-                        # Finally, resize to the exact anomaly map shape (W, H)
                         gt_mask_pil = TF.resize(
                             gt_mask_pil,
-                            (H, W),  # (H, W)
+                            (H, W),
                             interpolation=TF.InterpolationMode.NEAREST,
                         )
                         gt_mask = (np.array(gt_mask_pil) > 0).astype(np.uint8)
-                    # --- END FIX ---
 
                     px_true_all.extend(gt_mask.flatten().astype(np.uint8))
-                    # Store RAW scores for P-AUROC
                     px_pred_all_auroc.extend(
                         anomaly_map_final.flatten().astype(np.float32)
                     )
-                    # Store NORMALIZED scores for P-F1
                     px_pred_all_normalized.extend(
                         anomaly_map_normalized.flatten().astype(np.float32)
                     )
 
                     if is_anomaly:
                         anomalous_gt_masks.append(gt_mask)
-                        # Store NORMALIZED map for AUPRO
                         anomalous_anomaly_maps.append(anomaly_map_normalized)
                         if vis_saved_count < args.vis_count:
-                            # --- START VIZ FIX: Crop image for visualization ---
-                            vis_img = pil_img  # This is pil_imgs[j]
+                            vis_img = pil_img
                             if args.docrop:
                                 resize_res = int(args.image_res / 0.875)
                                 vis_img = TF.resize(
@@ -817,16 +850,27 @@ def main():
                                 vis_img = TF.center_crop(
                                     vis_img, (args.image_res, args.image_res)
                                 )
-                            # --- END VIZ FIX ---
+
+                            saliency_map_resized = post_process_map(
+                                saliency_map_patch,
+                                anomaly_map_normalized.shape,
+                                blur=False,
+                            )
+                            saliency_map_normalized = min_max_norm(
+                                saliency_map_resized
+                            )
 
                             save_visualization(
                                 path,
-                                vis_img,  # Pass the (potentially) cropped image
-                                gt_mask,  # This mask is already fixed
-                                anomaly_map_normalized,  # Use normalized for viz
+                                vis_img,
+                                gt_mask,
+                                anomaly_map_normalized,
                                 args.outdir,
                                 category,
                                 vis_saved_count,
+                                saliency_mask=saliency_map_normalized
+                                if args.remove_bg
+                                else None,
                             )
                             vis_saved_count += 1
             test_iter.update(len(path_batch))

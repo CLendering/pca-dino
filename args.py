@@ -71,7 +71,7 @@ def get_args():
     parser.add_argument(
         "--layers",
         type=str,
-        default="-12,-13,-14,-15,-16,-17,-18",
+        default="-1",
         help="Comma-separated layer indices for 'concat' or 'mean' aggregation.",
     )
     parser.add_argument(
@@ -103,7 +103,7 @@ def get_args():
         "--aug_list",
         type=str,
         nargs="+",
-        default=["rotate", "affine", "color_jitter", "hflip"],
+        default=["rotate"],
         help="""List of augmentations to apply. 
         Choices: hflip, vflip, rotate, color_jitter, affine.""",
     )
@@ -160,15 +160,34 @@ def get_args():
     parser.add_argument(
         "--img_score_agg",
         type=str,
-        default="p99",
+        default="max",
         choices=["max", "mean", "p99"],
         help="Aggregation for image-level scores from pixel maps.",
     )
     parser.add_argument(
         "--pro_integration_limit",
         type=float,
-        default=0.30,
+        default=0.3,
         help="Integration limit for AU-PRO calculation.",
+    )
+
+    # --- Background Removal (Saliency) Arguments ---
+    parser.add_argument(
+        "--remove_bg",
+        action="store_true",
+        help="Use DINO CLS-attention to mask background for training and testing.",
+    )
+    parser.add_argument(
+        "--saliency_layer",
+        type=int,
+        default=18,  # Default to a mid-level layer, e.g., 6. 0 is the first.
+        help="Which transformer layer's attention to use for saliency (0-indexed).",
+    )
+    parser.add_argument(
+        "--saliency_threshold",
+        type=float,
+        default=0.5,
+        help="Percentile threshold (0.0-1.0) for saliency mask. Keeps tokens >= this percentile.",
     )
 
     # --- Specular Reflection Filter Arguments ---
@@ -200,7 +219,7 @@ def get_args():
     parser.add_argument(
         "--vis_count",
         type=int,
-        default=10,
+        default=3,
         help="Number of anomalous examples to visualize per category.",
     )
     parser.add_argument(
