@@ -15,6 +15,17 @@ class FeatureExtractor:
         logging.info(f"Loading feature extraction model: {model_ckpt}...")
         self.processor = AutoImageProcessor.from_pretrained(model_ckpt)
         self.model = AutoModel.from_pretrained(model_ckpt).eval().to(DEVICE)
+        
+        # --- FIX for DINOv3/Transformers ---
+        # Force 'eager' attention implementation to get attention weights
+        # This resolves the "TypeError: 'NoneType' object is not subscriptable"
+        try:
+            self.model.set_attn_implementation('eager')
+            logging.info("Set model attention implementation to 'eager' to get attention weights.")
+        except AttributeError:
+            logging.warning("Could not set attention implementation. Saliency masking might fail.")
+        # --- END FIX ---
+            
         logging.info("Model loaded successfully.")
 
     @torch.no_grad()
@@ -28,6 +39,7 @@ class FeatureExtractor:
         docrop: bool = False,
         is_cosine: bool = False,
         use_clahe: bool = False,
+        saliency_layer: int = 0, # New argument
     ):
         """Extracts and aggregates features from a batch of images."""
         if use_clahe:
@@ -69,8 +81,16 @@ class FeatureExtractor:
             crop_size=crop_size,
         ).to(DEVICE)
 
-        outputs = self.model(**inputs, output_hidden_states=True)
+        outputs = self.model(
+            **inputs, output_hidden_states=True, output_attentions=True
+        )
         hidden_states = outputs.hidden_states
+        attentions = outputs.attentions  # Tuple of (B, Heads, N, N)
+        
+        if attentions is None:
+             raise ValueError("Attention weights are None. This is likely because the model is using a fast attention implementation "
+                              "(like Flash Attention). The 'eager' implementation was set, but this error persists. "
+                              "Please check your transformers library version or model compatibility.")
 
         cfg = self.model.config
         ps = cfg.patch_size
@@ -78,6 +98,41 @@ class FeatureExtractor:
         drop_front = 1 + num_reg
         h_p, w_p = res // ps, res // ps
         N_expected = h_p * w_p
+
+        # --- Saliency Mask Generation (REVISED LOGIC) ---
+        # Use the attention map from the specified saliency_layer
+        if saliency_layer < 0: # Handle negative indexing
+            saliency_layer = len(attentions) + saliency_layer
+        
+        if saliency_layer >= len(attentions):
+            logging.warning(f"Saliency layer {saliency_layer} is out of bounds (0-{len(attentions)-1}). Defaulting to layer 0.")
+            saliency_layer = 0
+
+        attn_map = attentions[saliency_layer]  # Shape: (B, num_heads, N_tokens, N_tokens)
+        
+        if num_reg > 0:
+            # DINOv3 uses register tokens. Their attention is a better saliency map.
+            # Get attention from REGISTER tokens (1 to num_reg) to PATCH tokens
+            reg_attn_to_patches = attn_map[
+                :, :, 1:drop_front, drop_front : drop_front + N_expected
+            ]
+            # Average across all heads AND all register tokens
+            saliency_mask = reg_attn_to_patches.mean(dim=(1, 2))  # Shape: (B, N_expected)
+        else:
+            # Fallback to CLS token (DINOv1 style)
+            logging.info("No register tokens found. Using CLS token for saliency mask.")
+            cls_attn_to_patches = attn_map[
+                :, :, 0, drop_front : drop_front + N_expected
+            ]
+            # Average across all heads
+            saliency_mask = cls_attn_to_patches.mean(dim=1)  # Shape: (B, N_expected)
+
+        # Reshape to 2D saliency mask
+        saliency_mask = saliency_mask.reshape(
+            inputs.pixel_values.shape[0], h_p, w_p
+        )
+        # --- End Saliency ---
+
 
         def _spatial_from_seq(seq_tokens: torch.Tensor) -> torch.Tensor:
             B, N, C = seq_tokens.shape
@@ -108,7 +163,5 @@ class FeatureExtractor:
                 fused = torch.stack(feats, dim=0).mean(dim=0)
             else:
                 raise ValueError(f"Unknown aggregation method: '{agg_method}'")
-        
-        
 
-        return fused.cpu().numpy(), (h_p, w_p)
+        return fused.cpu().numpy(), (h_p, w_p), saliency_mask.cpu().numpy()

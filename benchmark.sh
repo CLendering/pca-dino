@@ -13,4 +13,4 @@ conda activate pcadino
 
 
 #python -u main.py --dataset_name mvtec_ad --dataset_path datasets/mvtec-ad --use_specular_filter --image_res 336 --k_shot 8 --aug_count 30
-conda run -n pcadino python -u main.py --dataset_name visa --dataset_path datasets/visa --use_specular_filter --image_res 336 --k_shot 1 --use_clahe --aug_count 200
+conda run -n pcadino python -u main.py --dataset_name visa --dataset_path datasets/visa --use_specular_filter --image_res 336 --k_shot 1 --aug_count 30 --remove_bg
