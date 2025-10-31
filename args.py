@@ -103,7 +103,7 @@ def get_args():
         "--aug_list",
         type=str,
         nargs="+",
-        default=["rotate"],
+        default=["rotate", "affine", "color_jitter", "hflip"],
         help="""List of augmentations to apply. 
         Choices: hflip, vflip, rotate, color_jitter, affine.""",
     )
@@ -160,14 +160,14 @@ def get_args():
     parser.add_argument(
         "--img_score_agg",
         type=str,
-        default="max",
+        default="p99",
         choices=["max", "mean", "p99"],
         help="Aggregation for image-level scores from pixel maps.",
     )
     parser.add_argument(
         "--pro_integration_limit",
         type=float,
-        default=0.05,
+        default=0.30,
         help="Integration limit for AU-PRO calculation.",
     )
 
@@ -200,7 +200,7 @@ def get_args():
     parser.add_argument(
         "--vis_count",
         type=int,
-        default=3,
+        default=10,
         help="Number of anomalous examples to visualize per category.",
     )
     parser.add_argument(

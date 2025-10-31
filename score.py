@@ -174,7 +174,7 @@ def post_process_map(
         else:
             scalar_res = min(res)
 
-        k_size = int(scalar_res / 50)
+        k_size = int(scalar_res / 100)
         if k_size % 2 == 0:
             k_size += 1
         k_size = max(3, k_size)
