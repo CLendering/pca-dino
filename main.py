@@ -101,6 +101,7 @@ def main():
     run_name += (
         f"pca_ev{args.pca_ev}" if args.pca_ev is not None else f"_pca_dim{args.pca_dim}"
     )
+    run_name += f"i-score{args.img_score_agg}"
 
     # Add k-shot and augmentation info to run name
     if args.k_shot is not None:

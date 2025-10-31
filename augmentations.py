@@ -19,7 +19,7 @@ def get_augmentation_transform(aug_list: list, image_res: int):
             transforms_list.append(T.RandomVerticalFlip(p=0.5))
             logging.info("Added augmentation: RandomVerticalFlip(p=0.5)")
         elif aug_name == "rotate":
-            transforms_list.append(T.RandomRotation(degrees=(0, 315)))
+            transforms_list.append(T.RandomRotation(degrees=(0, 15)))
             logging.info("Added augmentation: RandomRotation(degrees=15)")
         elif aug_name == "color_jitter":
             transforms_list.append(

@@ -1,0 +1,18 @@
+# Core ML & CV
+torch
+torchvision
+transformers
+opencv-python
+kornia
+
+# Data & Numerics
+numpy
+pandas
+scikit-learn
+Pillow
+
+# Anomaly Detection
+anomalib
+
+# Utilities
+tqdm
