@@ -50,7 +50,7 @@ def get_args():
         help="Overlap ratio between patches.",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=8, help="Batch size for feature extraction."
+        "--batch_size", type=int, default=16, help="Batch size for feature extraction."
     )
 
     parser.add_argument(
@@ -71,7 +71,7 @@ def get_args():
     parser.add_argument(
         "--layers",
         type=str,
-        default="-1",
+        default="-12,-13,-14,-15,-16,-17,-18",
         help="Comma-separated layer indices for 'concat' or 'mean' aggregation.",
     )
     parser.add_argument(
@@ -104,7 +104,7 @@ def get_args():
         type=str,
         nargs="+",
         default=["rotate"],
-        help="""List of augmentations to apply. 
+        help="""List of augmentations to apply.
         Choices: hflip, vflip, rotate, color_jitter, affine.""",
     )
 
@@ -160,8 +160,8 @@ def get_args():
     parser.add_argument(
         "--img_score_agg",
         type=str,
-        default="max",
-        choices=["max", "mean", "p99"],
+        default="mtop5",
+        choices=["max", "mean", "p99", "mtop5"],
         help="Aggregation for image-level scores from pixel maps.",
     )
     parser.add_argument(
@@ -173,21 +173,32 @@ def get_args():
 
     # --- Background Removal (Saliency) Arguments ---
     parser.add_argument(
-        "--remove_bg",
-        action="store_true",
-        help="Use DINO CLS-attention to mask background for training and testing.",
+        "--bg_mask_method",
+        type=str,
+        default=None,
+        choices=[None, "dino_saliency", "pca_normality"],
+        help="Method to use for background masking. 'dino_saliency' uses DINO attention. "
+        "'pca_normality' uses PC1 projection (AnomalyDINO style). "
+        "NOTE: 'pca_normality' is only compatible with full-image mode (no --patch_size).",
     )
     parser.add_argument(
-        "--saliency_layer",
-        type=int,
-        default=18,  # Default to a mid-level layer, e.g., 6. 0 is the first.
-        help="Which transformer layer's attention to use for saliency (0-indexed).",
+        "--mask_threshold_method",
+        type=str,
+        default="percentile",
+        choices=["percentile", "otsu"],
+        help="How to binarize the saliency/normality map.",
     )
     parser.add_argument(
-        "--saliency_threshold",
+        "--percentile_threshold",
         type=float,
-        default=0.5,
-        help="Percentile threshold (0.0-1.0) for saliency mask. Keeps tokens >= this percentile.",
+        default=0.3,
+        help="Percentile threshold (0.0-1.0) for 'percentile' method. Keeps tokens >= this percentile.",
+    )
+    parser.add_argument(
+        "--dino_saliency_layer",
+        type=int,
+        default=6,  # Default to a mid-level layer, e.g., 6. 0 is the first.
+        help="Which transformer layer's attention to use for 'dino_saliency' mask (0-indexed).",
     )
 
     # --- Specular Reflection Filter Arguments ---
@@ -219,7 +230,7 @@ def get_args():
     parser.add_argument(
         "--vis_count",
         type=int,
-        default=3,
+        default=10,
         help="Number of anomalous examples to visualize per category.",
     )
     parser.add_argument(

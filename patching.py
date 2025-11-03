@@ -1,6 +1,7 @@
 import numpy as np
 from args import parse_layer_indices, parse_grouped_layers
 import logging
+import cv2  # Import OpenCV
 from features import FeatureExtractor
 from score import calculate_anomaly_scores, post_process_map
 
@@ -43,6 +44,12 @@ def process_image_patched(
     anomaly_maps_final = []
     saliency_maps_final = []  # Store stitched saliency maps
 
+    if args.bg_mask_method == "pca_normality":
+        logging.warning(
+            "Patching mode is not compatible with 'pca_normality' masking. "
+            "Falling back to 'dino_saliency' for masking."
+        )
+
     for pil_img in pil_imgs:
         img_width, img_height = pil_img.size
         patch_coords = get_patch_coords(
@@ -71,7 +78,7 @@ def process_image_patched(
                 args.docrop,
                 is_cosine=(args.score_method == "cosine"),
                 use_clahe=args.use_clahe,
-                saliency_layer=args.saliency_layer,  # Pass the argument
+                dino_saliency_layer=args.dino_saliency_layer,
             )
 
             scores = calculate_anomaly_scores(
@@ -82,16 +89,28 @@ def process_image_patched(
             )
             anomaly_maps_batch = scores.reshape(len(patch_batch), h_p, w_p)
 
-            if args.remove_bg:
-                # Use percentile threshold across the whole batch of patches
-                try:
-                    threshold = np.percentile(
-                        saliency_masks_batch, args.saliency_threshold * 100
-                    )
-                    background_mask = saliency_masks_batch < threshold
-                    anomaly_maps_batch[background_mask] = 0.0  # Zero out background
-                except IndexError:
-                    logging.warning("Saliency mask percentile calculation failed. Skipping background removal for this batch.")
+            if args.bg_mask_method is not None:
+                # In patching mode, we must use dino_saliency, as pca_normality is not possible.
+                background_mask = np.zeros_like(anomaly_maps_batch, dtype=bool)
+                for j in range(len(patch_batch)):
+                    saliency_map = saliency_masks_batch[j]
+                    try:
+                        if args.mask_threshold_method == "percentile":
+                            threshold = np.percentile(
+                                saliency_map, args.percentile_threshold * 100
+                            )
+                            background_mask[j] = saliency_map < threshold
+                        else:  # otsu
+                            norm_mask = cv2.normalize(
+                                saliency_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                            )
+                            _, binary_mask = cv2.threshold(
+                                norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                            )
+                            background_mask[j] = binary_mask == 0
+                    except Exception as e:
+                        logging.warning(f"Saliency mask failed for patch {j}: {e}. Skipping mask.")
+                anomaly_maps_batch[background_mask] = 0.0  # Zero out background
 
 
             for j, anomaly_map_patch in enumerate(anomaly_maps_batch):

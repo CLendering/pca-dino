@@ -10,6 +10,7 @@ import torch
 import torchvision.transforms.functional as TF
 from PIL import Image
 from tqdm import tqdm
+import cv2  # Import OpenCV
 from sklearn.metrics import (
     roc_auc_score,
     f1_score,
@@ -22,21 +23,21 @@ from args import get_args, parse_layer_indices, parse_grouped_layers
 from utils import (
     setup_logging,
     save_config,
-    min_max_norm,  # Import min_max_norm
+    min_max_norm,
 )
 from dataclass import get_dataset_handler
 from features import FeatureExtractor
-from pca import PCAModel, KernelPCAModel
+from pca import PCAModel, KernelPCAModel, get_pc_projection_map
 from score import calculate_anomaly_scores, post_process_map
 from viz import save_visualization
 from specular import specular_mask_torch, filter_specular_anomalies
 from patching import process_image_patched, get_patch_coords
 from augmentations import get_augmentation_transform
 
-
-torch.manual_seed(42)
-np.random.seed(42)
-random.seed(42)
+# change from 42
+torch.manual_seed(2)
+np.random.seed(2)
+random.seed(2)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 print(f"Using device: {DEVICE}")
@@ -95,8 +96,13 @@ def main():
         run_name += f"_kpca-{args.kernel_pca_kernel}"
     if args.use_specular_filter:
         run_name += "_spec-filt"
-    if args.remove_bg:
-        run_name += f"_rmbg{args.saliency_threshold}_L{args.saliency_layer}" # Show layer in name
+    if args.bg_mask_method:
+        run_name += f"_mask-{args.bg_mask_method}_thr-{args.mask_threshold_method}"
+        if args.mask_threshold_method == "percentile":
+            run_name += f"{args.percentile_threshold}"
+        if args.bg_mask_method == "dino_saliency":
+             run_name += f"_L{args.dino_saliency_layer}"
+
 
     run_name += f"_score-{args.score_method}"
     run_name += f"_clahe{int(args.use_clahe)}"
@@ -196,6 +202,15 @@ def main():
         # 1. Fit PCA Model
         if args.patch_size:
             # --- PCA on Patches ---
+            if args.bg_mask_method == "pca_normality":
+                logging.error(
+                    "PCA Normality mask is not compatible with --patch_size. "
+                    "Use 'dino_saliency' or no mask."
+                )
+                raise ValueError(
+                    "Cannot use pca_normality mask with patch_size."
+                )
+
             temp_img = Image.open(train_paths[0]).convert("RGB")
             temp_patch = temp_img.crop((0, 0, args.patch_size, args.patch_size))
             temp_tokens, (h_p, w_p), _ = extractor.extract_tokens(
@@ -207,7 +222,7 @@ def main():
                 args.docrop,
                 is_cosine=(args.score_method == "cosine"),
                 use_clahe=args.use_clahe,
-                saliency_layer=args.saliency_layer,
+                dino_saliency_layer=args.dino_saliency_layer,
             )
             feature_dim = temp_tokens.shape[-1]
             tokens_per_patch = h_p * w_p
@@ -269,17 +284,26 @@ def main():
                                 args.docrop,
                                 is_cosine=(args.score_method == "cosine"),
                                 use_clahe=args.use_clahe,
-                                saliency_layer=args.saliency_layer,
+                                dino_saliency_layer=args.dino_saliency_layer,
                             )
                             tokens_flat = tokens_batch.reshape(-1, feature_dim)
 
-                            if args.remove_bg:
+                            if args.bg_mask_method == "dino_saliency":
                                 masks_flat = saliency_masks_batch.reshape(-1)
                                 try:
-                                    threshold = np.percentile(
-                                        masks_flat, args.saliency_threshold * 100
-                                    )
-                                    foreground_tokens = tokens_flat[masks_flat >= threshold]
+                                    if args.mask_threshold_method == "percentile":
+                                        threshold = np.percentile(
+                                            masks_flat, args.percentile_threshold * 100
+                                        )
+                                        foreground_tokens = tokens_flat[masks_flat >= threshold]
+                                    else:  # otsu
+                                        norm_mask = cv2.normalize(
+                                            masks_flat, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                                        )
+                                        _, binary_mask = cv2.threshold(
+                                            norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                                        )
+                                        foreground_tokens = tokens_flat[binary_mask.flatten() > 0]
 
                                     if foreground_tokens.shape[0] > 0:
                                         yield foreground_tokens
@@ -288,10 +312,11 @@ def main():
                                             "No foreground patch tokens found. Yielding all tokens."
                                         )
                                         yield tokens_flat
-                                except IndexError:
-                                    logging.warning("Percentile calculation failed. Yielding all tokens.")
+                                except Exception as e:
+                                    logging.warning(f"Masking failed: {e}. Yielding all tokens.")
                                     yield tokens_flat
                             else:
+                                # No mask or pca_normality (which is disabled)
                                 yield tokens_flat
 
             feature_generator = feature_generator_patched
@@ -308,7 +333,7 @@ def main():
                 args.docrop,
                 is_cosine=(args.score_method == "cosine"),
                 use_clahe=args.use_clahe,
-                saliency_layer=args.saliency_layer,
+                dino_saliency_layer=args.dino_saliency_layer,
             )
             feature_dim = temp_tokens.shape[-1]
 
@@ -349,18 +374,28 @@ def main():
                         args.docrop,
                         is_cosine=(args.score_method == "cosine"),
                         use_clahe=args.use_clahe,
-                        saliency_layer=args.saliency_layer,
+                        dino_saliency_layer=args.dino_saliency_layer,
                     )
                     tokens_flat = tokens_batch.reshape(-1, feature_dim)
 
-                    if args.remove_bg:
+                    # --- Training Masking Logic ---
+                    if args.bg_mask_method == "dino_saliency":
                         masks_flat = saliency_masks_batch.reshape(-1)
                         try:
-                            threshold = np.percentile(
-                                masks_flat, args.saliency_threshold * 100
-                            )
-                            foreground_tokens = tokens_flat[masks_flat >= threshold]
-
+                            if args.mask_threshold_method == "percentile":
+                                threshold = np.percentile(
+                                    masks_flat, args.percentile_threshold * 100
+                                )
+                                foreground_tokens = tokens_flat[masks_flat >= threshold]
+                            else: # otsu
+                                norm_mask = cv2.normalize(
+                                    masks_flat, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                                )
+                                _, binary_mask = cv2.threshold(
+                                    norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                                )
+                                foreground_tokens = tokens_flat[binary_mask.flatten() > 0]
+                                
                             if foreground_tokens.shape[0] > 0:
                                 yield foreground_tokens
                             else:
@@ -368,16 +403,26 @@ def main():
                                     "No foreground tokens found. Yielding all tokens."
                                 )
                                 yield tokens_flat
-                        except IndexError:
-                            logging.warning("Percentile calculation failed. Yielding all tokens.")
+                        except Exception as e:
+                            logging.warning(f"Masking failed: {e}. Yielding all tokens.")
                             yield tokens_flat
                     else:
+                        # For 'pca_normality' or None, train on ALL tokens
                         yield tokens_flat
 
             num_batches = math.ceil(total_train_images / args.batch_size)
             feature_generator = feature_generator_full
 
         if args.use_kernel_pca:
+            if args.bg_mask_method == "pca_normality":
+                 logging.error(
+                    "PCA Normality mask is not compatible with Kernel PCA. "
+                    "Use 'dino_saliency' or no mask."
+                )
+                 raise ValueError(
+                    "Cannot use pca_normality mask with use_kernel_pca."
+                )
+            
             logging.info("Collecting all features for Kernel PCA...")
             all_train_tokens = np.concatenate(
                 list(
@@ -433,20 +478,19 @@ def main():
                     )
                     for j, anomaly_map_final in enumerate(anomaly_maps_batch):
                         # --- IMAGE METRICS (I-AUROC, I-F1) ---
-                        # Use RAW map for global score
                         if args.img_score_agg == "max":
                             img_score = float(np.max(anomaly_map_final))
                         elif args.img_score_agg == "p99":
                             img_score = float(np.percentile(anomaly_map_final, 99))
+                        elif args.img_score_agg == "mtop5":
+                            img_score = float(np.mean(np.sort(anomaly_map_final.flatten())[-5:]))
                         else:
                             img_score = float(np.mean(anomaly_map_final))
                         val_img_scores.append(img_score)
                         val_img_labels.append(1 if is_anomaly_batch[j] else 0)
 
                         # --- PIXEL METRICS (AUPRO, P-F1) ---
-                        # Use PER-IMAGE NORMALIZED map
                         anomaly_map_normalized = min_max_norm(anomaly_map_final)
-
                         H, W = anomaly_map_normalized.shape
                         gt_mask = handler.get_ground_truth_mask(
                             path_batch[j], pil_imgs[j].size
@@ -459,13 +503,12 @@ def main():
                             )
                             > 127
                         )
-
                         val_px_gts.extend(gt_mask.flatten().astype(np.uint8))
                         val_px_scores_normalized.extend(
                             anomaly_map_normalized.flatten().astype(np.float32)
                         )
 
-                else:
+                else: # Full-image mode
                     (
                         tokens,
                         (h_p, w_p),
@@ -479,7 +522,7 @@ def main():
                         args.docrop,
                         is_cosine=(args.score_method == "cosine"),
                         use_clahe=args.use_clahe,
-                        saliency_layer=args.saliency_layer,
+                        dino_saliency_layer=args.dino_saliency_layer,
                     )
                     b, _, _, c = tokens.shape
                     tokens_reshaped = tokens.reshape(b * h_p * w_p, c)
@@ -492,18 +535,53 @@ def main():
                     )
                     anomaly_maps = scores.reshape(b, h_p, w_p)
 
-                    if args.remove_bg:
-                        # Use percentile threshold across the whole batch
-                        try:
-                            threshold = np.percentile(
-                                saliency_masks_batch, args.saliency_threshold * 100
-                            )
-                            background_mask = saliency_masks_batch < threshold
-                            anomaly_maps[
-                                background_mask
-                            ] = 0.0  # Zero out background scores
-                        except IndexError:
-                             logging.warning("Saliency mask percentile calculation failed. Skipping background removal for this batch.")
+                    # --- Apply Masking Strategy (Validation) ---
+                    if args.bg_mask_method == "dino_saliency":
+                        background_mask = np.zeros_like(anomaly_maps, dtype=bool)
+                        for j in range(b):
+                            saliency_map = saliency_masks_batch[j]
+                            try:
+                                if args.mask_threshold_method == "percentile":
+                                    threshold = np.percentile(
+                                        saliency_map, args.percentile_threshold * 100
+                                    )
+                                    background_mask[j] = saliency_map < threshold
+                                else:  # otsu
+                                    norm_mask = cv2.normalize(
+                                        saliency_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                                    )
+                                    _, binary_mask = cv2.threshold(
+                                        norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                                    )
+                                    background_mask[j] = binary_mask == 0
+                            except Exception as e:
+                                logging.warning(f"Saliency mask failed for val image {j}: {e}. Skipping mask.")
+                        anomaly_maps[background_mask] = 0.0
+
+                    elif args.bg_mask_method == "pca_normality":
+                        pc1_map_flat = get_pc_projection_map(tokens_reshaped, pca_params, 0)
+                        pc1_map = pc1_map_flat.reshape(b, h_p, w_p)
+                        background_mask = np.zeros_like(anomaly_maps, dtype=bool)
+                        for j in range(b):
+                            pc1_map_img = pc1_map[j]
+                            try:
+                                if args.mask_threshold_method == "percentile":
+                                    threshold = np.percentile(
+                                        pc1_map_img, args.percentile_threshold * 100
+                                    )
+                                    background_mask[j] = pc1_map_img < threshold
+                                else: # otsu
+                                    norm_mask = cv2.normalize(
+                                        pc1_map_img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                                    )
+                                    _, binary_mask = cv2.threshold(
+                                        norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                                    )
+                                    background_mask[j] = binary_mask == 0
+                            except Exception as e:
+                                logging.warning(f"PCA mask failed for val image {j}: {e}. Skipping mask.")
+                        anomaly_maps[background_mask] = 0.0
+                    # --- End Masking ---
 
 
                     for j in range(anomaly_maps.shape[0]):
@@ -532,18 +610,18 @@ def main():
                             )
 
                         # --- IMAGE METRICS (I-AUROC, I-F1) ---
-                        # Use RAW map for global score
                         if args.img_score_agg == "max":
                             img_score = float(np.max(anomaly_map_final))
                         elif args.img_score_agg == "p99":
                             img_score = float(np.percentile(anomaly_map_final, 99))
+                        elif args.img_score_agg == "mtop5":
+                            img_score = float(np.mean(np.sort(anomaly_map_final.flatten())[-5:]))
                         else:
                             img_score = float(np.mean(anomaly_map_final))
                         val_img_scores.append(img_score)
                         val_img_labels.append(1 if is_anomaly_batch[j] else 0)
 
                         # --- PIXEL METRICS (AUPRO, P-F1) ---
-                        # Use PER-IMAGE NORMALIZED map
                         anomaly_map_normalized = min_max_norm(anomaly_map_final)
                         H, W = anomaly_map_normalized.shape
 
@@ -640,7 +718,7 @@ def main():
                     is_anomaly = is_anomaly_batch[j]
                     path = path_batch[j]
                     pil_img = pil_imgs[j]
-                    saliency_map_final = saliency_maps_batch[j]
+                    saliency_map_final = saliency_maps_batch[j] # This is the stitched saliency map
 
                     if args.use_specular_filter:
                         img_tensor = TF.to_tensor(pil_imgs[j]).unsqueeze(0).to(DEVICE)
@@ -665,6 +743,8 @@ def main():
                         img_score = np.max(anomaly_map_final)
                     elif args.img_score_agg == "p99":
                         img_score = np.percentile(anomaly_map_final, 99)
+                    elif args.img_score_agg == "mtop5":
+                        img_score = np.mean(np.sort(anomaly_map_final.flatten())[-5:])
                     else:
                         img_score = np.mean(anomaly_map_final)
 
@@ -700,7 +780,27 @@ def main():
                         anomalous_anomaly_maps.append(anomaly_map_normalized)
                         if vis_saved_count < args.vis_count:
                             vis_img = pil_img
-                            saliency_map_normalized = min_max_norm(saliency_map_final)
+                            
+                            saliency_map_for_viz = None
+                            if args.bg_mask_method is not None:
+                                try:
+                                    # saliency_map_final is the raw, stitched saliency map
+                                    if args.mask_threshold_method == "percentile":
+                                        threshold_val = np.percentile(
+                                            saliency_map_final, args.percentile_threshold * 100
+                                        )
+                                        saliency_map_for_viz = (saliency_map_final >= threshold_val).astype(np.float32)
+                                    else: # otsu
+                                        norm_mask = cv2.normalize(
+                                            saliency_map_final, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                                        )
+                                        _, binary_mask = cv2.threshold(
+                                            norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                                        )
+                                        saliency_map_for_viz = (binary_mask > 0).astype(np.float32)
+
+                                except Exception as e:
+                                    logging.warning(f"Saliency mask percentile calculation failed for visualization (patching): {e}.")
 
                             save_visualization(
                                 path,
@@ -710,12 +810,10 @@ def main():
                                 args.outdir,
                                 category,
                                 vis_saved_count,
-                                saliency_mask=saliency_map_normalized
-                                if args.remove_bg
-                                else None,
+                                saliency_mask=saliency_map_for_viz, # Pass the binary mask
                             )
                             vis_saved_count += 1
-            else:
+            else: # Full-image mode
                 (
                     tokens,
                     (h_p, w_p),
@@ -729,7 +827,7 @@ def main():
                     args.docrop,
                     is_cosine=(args.score_method == "cosine"),
                     use_clahe=args.use_clahe,
-                    saliency_layer=args.saliency_layer,
+                    dino_saliency_layer=args.dino_saliency_layer,
                 )
                 b, _, _, c = tokens.shape
                 tokens_reshaped = tokens.reshape(b * h_p * w_p, c)
@@ -742,25 +840,61 @@ def main():
                 )
                 anomaly_maps = scores.reshape(b, h_p, w_p)
 
-                if args.remove_bg:
-                    # Use percentile threshold across the whole batch
-                    try:
-                        threshold = np.percentile(
-                            saliency_masks_batch, args.saliency_threshold * 100
-                        )
-                        background_mask = saliency_masks_batch < threshold
-                        anomaly_maps[
-                            background_mask
-                        ] = 0.0  # Zero out background scores
-                    except IndexError:
-                        logging.warning("Saliency mask percentile calculation failed. Skipping background removal for this batch.")
+                # --- Apply Masking Strategy (Test) ---
+                mask_for_viz = None # Initialize mask for visualization
+                background_mask = np.zeros_like(anomaly_maps, dtype=bool)
 
+                if args.bg_mask_method == "dino_saliency":
+                    mask_for_viz = saliency_masks_batch # Save raw saliency map for viz
+                    for j in range(b):
+                        saliency_map = saliency_masks_batch[j]
+                        try:
+                            if args.mask_threshold_method == "percentile":
+                                threshold = np.percentile(
+                                    saliency_map, args.percentile_threshold * 100
+                                )
+                                background_mask[j] = saliency_map < threshold
+                            else:  # otsu
+                                norm_mask = cv2.normalize(
+                                    saliency_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                                )
+                                _, binary_mask = cv2.threshold(
+                                    norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                                )
+                                background_mask[j] = binary_mask == 0
+                        except Exception as e:
+                            logging.warning(f"Saliency mask failed for test image {j}: {e}. Skipping mask.")
+                    anomaly_maps[background_mask] = 0.0
+
+                elif args.bg_mask_method == "pca_normality":
+                    pc1_map_flat = get_pc_projection_map(tokens_reshaped, pca_params, 0)
+                    pc1_map = pc1_map_flat.reshape(b, h_p, w_p)
+                    mask_for_viz = pc1_map # Save raw PC1 map for viz
+                    for j in range(b):
+                        pc1_map_img = pc1_map[j]
+                        try:
+                            if args.mask_threshold_method == "percentile":
+                                threshold = np.percentile(
+                                    pc1_map_img, args.percentile_threshold * 100
+                                )
+                                background_mask[j] = pc1_map_img < threshold
+                            else: # otsu
+                                norm_mask = cv2.normalize(
+                                    pc1_map_img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                                )
+                                _, binary_mask = cv2.threshold(
+                                    norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                                )
+                                background_mask[j] = binary_mask == 0
+                        except Exception as e:
+                            logging.warning(f"PCA mask failed for test image {j}: {e}. Skipping mask.")
+                    anomaly_maps[background_mask] = 0.0
+                # --- End Masking ---
 
                 for j in range(anomaly_maps.shape[0]):
                     pil_img = pil_imgs[j]
                     is_anomaly = is_anomaly_batch[j]
                     path = path_batch[j]
-                    saliency_map_patch = saliency_masks_batch[j]
 
                     anomaly_map_final = post_process_map(
                         anomaly_maps[j], args.image_res
@@ -789,6 +923,8 @@ def main():
                         img_score = np.max(anomaly_map_final)
                     elif args.img_score_agg == "p99":
                         img_score = np.percentile(anomaly_map_final, 99)
+                    elif args.img_score_agg == "mtop5":
+                        img_score = np.mean(np.sort(anomaly_map_final.flatten())[-5:])
                     else:
                         img_score = np.mean(anomaly_map_final)
 
@@ -851,15 +987,34 @@ def main():
                                     vis_img, (args.image_res, args.image_res)
                                 )
 
-                            saliency_map_resized = post_process_map(
-                                saliency_map_patch,
-                                anomaly_map_normalized.shape,
-                                blur=False,
-                            )
-                            saliency_map_normalized = min_max_norm(
-                                saliency_map_resized
-                            )
+                            saliency_map_for_viz = None
+                            if mask_for_viz is not None:
+                                # Get the raw mask for this specific image
+                                raw_mask_map = mask_for_viz[j]
+                                try:
+                                    if args.mask_threshold_method == "percentile":
+                                        threshold_val = np.percentile(
+                                            raw_mask_map, args.percentile_threshold * 100
+                                        )
+                                        binary_mask = (raw_mask_map >= threshold_val).astype(np.float32)
+                                    else: # otsu
+                                        norm_mask = cv2.normalize(
+                                            raw_mask_map, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                                        )
+                                        _, binary_mask_u8 = cv2.threshold(
+                                            norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                                        )
+                                        binary_mask = (binary_mask_u8 > 0).astype(np.float32)
 
+                                    # Resize the binary mask to the visualization size
+                                    saliency_map_for_viz = post_process_map(
+                                        binary_mask,
+                                        anomaly_map_normalized.shape,
+                                        blur=False,
+                                    )
+                                except Exception as e:
+                                     logging.warning(f"Saliency mask percentile calculation failed for visualization: {e}.")
+                                     
                             save_visualization(
                                 path,
                                 vis_img,
@@ -868,9 +1023,7 @@ def main():
                                 args.outdir,
                                 category,
                                 vis_saved_count,
-                                saliency_mask=saliency_map_normalized
-                                if args.remove_bg
-                                else None,
+                                saliency_mask=saliency_map_for_viz, # Pass the (optional) binary mask
                             )
                             vis_saved_count += 1
             test_iter.update(len(path_batch))
@@ -924,7 +1077,7 @@ def main():
         # --- AUPRO (uses NORMALIZED scores) ---
         if len(anomalous_gt_masks) > 0:
             preds_np = np.stack(anomalous_anomaly_maps).astype(np.float32)  # [N,H,W]
-            gts_np = np.stack(anomalous_gt_masks).astype(np.uint8)  # [N,H,W]
+            gts_np = np.stack(anomalous_gt_masks).astype(np.uint8)  # [N,H_W]
 
             # Maps are already per-image normalized, no global norm needed
 

@@ -53,8 +53,11 @@ def save_visualization(
     panel3 = add_text(heatmap, "Anomaly Map")
 
     if saliency_mask is not None:
-        # Normalize saliency mask for visualization
+        # --- THIS IS THE FIX ---
+        # Convert binary 0/1 float mask to 0/255 uint8 image
         saliency_mask_vis = (saliency_mask * 255).astype(np.uint8)
+        # --- END FIX ---
+        
         saliency_mask_vis = cv2.cvtColor(saliency_mask_vis, cv2.COLOR_GRAY2RGB)
         panel4 = add_text(saliency_mask_vis, "Saliency Mask (FG)")
     else:

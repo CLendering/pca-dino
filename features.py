@@ -39,7 +39,7 @@ class FeatureExtractor:
         docrop: bool = False,
         is_cosine: bool = False,
         use_clahe: bool = False,
-        saliency_layer: int = 0, # New argument
+        dino_saliency_layer: int = 0, # New argument
     ):
         """Extracts and aggregates features from a batch of images."""
         if use_clahe:
@@ -99,16 +99,15 @@ class FeatureExtractor:
         h_p, w_p = res // ps, res // ps
         N_expected = h_p * w_p
 
-        # --- Saliency Mask Generation (REVISED LOGIC) ---
-        # Use the attention map from the specified saliency_layer
-        if saliency_layer < 0: # Handle negative indexing
-            saliency_layer = len(attentions) + saliency_layer
+        # --- Saliency Mask Generation ---
+        if dino_saliency_layer < 0: # Handle negative indexing
+            dino_saliency_layer = len(attentions) + dino_saliency_layer
         
-        if saliency_layer >= len(attentions):
-            logging.warning(f"Saliency layer {saliency_layer} is out of bounds (0-{len(attentions)-1}). Defaulting to layer 0.")
-            saliency_layer = 0
-
-        attn_map = attentions[saliency_layer]  # Shape: (B, num_heads, N_tokens, N_tokens)
+        if dino_saliency_layer >= len(attentions):
+            logging.warning(f"DINO saliency layer {dino_saliency_layer} is out of bounds (0-{len(attentions)-1}). Defaulting to layer 0.")
+            dino_saliency_layer = 0
+            
+        attn_map = attentions[dino_saliency_layer]  # Shape: (B, num_heads, N_tokens, N_tokens)
         
         if num_reg > 0:
             # DINOv3 uses register tokens. Their attention is a better saliency map.

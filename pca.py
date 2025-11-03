@@ -147,3 +147,35 @@ class PCAModel:
             ),
         }
         return self.pca_params
+
+
+def get_pc_projection_map(
+    tokens_reshaped: np.ndarray, pca: dict, pc_index: int = 0
+):
+    """
+    Projects tokens onto a single principal component (e.g., PC1) to create a
+    'normality' map, as done in AnomalyDINO.
+    Returns a 1D score (projection value) for each token.
+    """
+    if "kpca" in pca:
+        logging.warning(
+            "PCA projection masking is not supported for Kernel PCA. Returning empty mask."
+        )
+        return np.zeros(tokens_reshaped.shape[0], dtype=np.float32)
+
+    if pc_index >= pca["k"]:
+        raise ValueError(
+            f"pc_index {pc_index} is out of bounds for PCA with k={pca['k']}"
+        )
+
+    mu = np.asarray(pca["mu"], dtype=tokens_reshaped.dtype)
+    # Get only the component we care about
+    C = np.asarray(
+        pca["components"][:, pc_index : pc_index + 1], dtype=tokens_reshaped.dtype
+    )  # [D, 1]
+
+    # Project centered tokens onto the component
+    Z = (tokens_reshaped - mu) @ C  # [N, D] @ [D, 1] -> [N, 1]
+
+    # AnomalyDINO uses the *absolute* projection value as the normality score
+    return np.abs(Z.flatten())
