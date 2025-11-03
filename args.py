@@ -160,8 +160,8 @@ def get_args():
     parser.add_argument(
         "--img_score_agg",
         type=str,
-        default="mtop5",
-        choices=["max", "mean", "p99", "mtop5"],
+        default="mtop1p",
+        choices=["max", "mean", "p99", "mtop5", "mtop1p"],
         help="Aggregation for image-level scores from pixel maps.",
     )
     parser.add_argument(
@@ -175,7 +175,7 @@ def get_args():
     parser.add_argument(
         "--bg_mask_method",
         type=str,
-        default=None,
+        default=None,   
         choices=[None, "dino_saliency", "pca_normality"],
         help="Method to use for background masking. 'dino_saliency' uses DINO attention. "
         "'pca_normality' uses PC1 projection (AnomalyDINO style). "
@@ -191,7 +191,7 @@ def get_args():
     parser.add_argument(
         "--percentile_threshold",
         type=float,
-        default=0.3,
+        default=0.2,
         help="Percentile threshold (0.0-1.0) for 'percentile' method. Keeps tokens >= this percentile.",
     )
     parser.add_argument(
@@ -224,7 +224,7 @@ def get_args():
     parser.add_argument(
         "--outdir",
         type=str,
-        default="./results",
+        default="./results_final",
         help="Directory to save results, logs, and visualizations.",
     )
     parser.add_argument(

@@ -85,6 +85,14 @@ def _pick_threshold_with_fallback(y_true, y_score, target_fpr):
     return None, "none"
 
 
+def topk_mean(arr, frac=0.01):
+    flat = arr.ravel()
+    k = max(1, int(len(flat) * frac))
+    # use partition for O(n)
+    idx = np.argpartition(flat, -k)[-k:]
+    return float(np.mean(flat[idx]))
+
+
 def main():
     args = get_args()
 
@@ -484,6 +492,8 @@ def main():
                             img_score = float(np.percentile(anomaly_map_final, 99))
                         elif args.img_score_agg == "mtop5":
                             img_score = float(np.mean(np.sort(anomaly_map_final.flatten())[-5:]))
+                        elif args.img_score_agg == "mtop1p":
+                            img_score = topk_mean(anomaly_map_final, frac=0.01)
                         else:
                             img_score = float(np.mean(anomaly_map_final))
                         val_img_scores.append(img_score)
@@ -616,6 +626,8 @@ def main():
                             img_score = float(np.percentile(anomaly_map_final, 99))
                         elif args.img_score_agg == "mtop5":
                             img_score = float(np.mean(np.sort(anomaly_map_final.flatten())[-5:]))
+                        elif args.img_score_agg == "mtop1p":
+                            img_score = topk_mean(anomaly_map_final, frac=0.01)
                         else:
                             img_score = float(np.mean(anomaly_map_final))
                         val_img_scores.append(img_score)
@@ -745,6 +757,8 @@ def main():
                         img_score = np.percentile(anomaly_map_final, 99)
                     elif args.img_score_agg == "mtop5":
                         img_score = np.mean(np.sort(anomaly_map_final.flatten())[-5:])
+                    elif args.img_score_agg == "mtop1p":
+                        img_score = topk_mean(anomaly_map_final, frac=0.01)
                     else:
                         img_score = np.mean(anomaly_map_final)
 
@@ -925,6 +939,8 @@ def main():
                         img_score = np.percentile(anomaly_map_final, 99)
                     elif args.img_score_agg == "mtop5":
                         img_score = np.mean(np.sort(anomaly_map_final.flatten())[-5:])
+                    elif args.img_score_agg == "mtop1p":
+                        img_score = topk_mean(anomaly_map_final, frac=0.01)
                     else:
                         img_score = np.mean(anomaly_map_final)
 

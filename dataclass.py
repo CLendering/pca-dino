@@ -97,7 +97,7 @@ class VisADataset(BaseDatasetHandler):
         self.test_path_to_mask_map = {}
 
         # The split file is assumed to be in the root_path, parallel to categories
-        split_file = self.root_path / "split_csv" / "2cls_fewshot.csv"
+        split_file = self.root_path / "split_csv" / "1cls.csv"
         if not split_file.exists():
             logging.error(f"VisA split file not found at: {split_file}")
             raise FileNotFoundError(f"VisA split file not found at: {split_file}")
