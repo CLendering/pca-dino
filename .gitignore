@@ -7,3 +7,4 @@ logs/
 __pycache__
 results*/
 secret*
+benchmark.sh
