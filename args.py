@@ -50,7 +50,7 @@ def get_args():
         help="Overlap ratio between patches.",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=16, help="Batch size for feature extraction."
+        "--batch_size", type=int, default=1, help="Batch size for feature extraction."
     )
 
     parser.add_argument(
@@ -71,7 +71,7 @@ def get_args():
     parser.add_argument(
         "--layers",
         type=str,
-        default="-12,-13,-14,-15,-16,-17,-18",
+        default="-13,-14,-15,-16,-17,-18,-19",
         help="Comma-separated layer indices for 'concat' or 'mean' aggregation.",
     )
     parser.add_argument(
@@ -175,7 +175,7 @@ def get_args():
     parser.add_argument(
         "--bg_mask_method",
         type=str,
-        default=None,   
+        default="pca_normality",
         choices=[None, "dino_saliency", "pca_normality"],
         help="Method to use for background masking. 'dino_saliency' uses DINO attention. "
         "'pca_normality' uses PC1 projection (AnomalyDINO style). "
@@ -191,7 +191,7 @@ def get_args():
     parser.add_argument(
         "--percentile_threshold",
         type=float,
-        default=0.2,
+        default=0.15,
         help="Percentile threshold (0.0-1.0) for 'percentile' method. Keeps tokens >= this percentile.",
     )
     parser.add_argument(
@@ -224,7 +224,7 @@ def get_args():
     parser.add_argument(
         "--outdir",
         type=str,
-        default="./results_final",
+        default="./results_final_visALayout",
         help="Directory to save results, logs, and visualizations.",
     )
     parser.add_argument(

@@ -162,5 +162,5 @@ class FeatureExtractor:
                 fused = torch.stack(feats, dim=0).mean(dim=0)
             else:
                 raise ValueError(f"Unknown aggregation method: '{agg_method}'")
-
+            
         return fused.cpu().numpy(), (h_p, w_p), saliency_mask.cpu().numpy()

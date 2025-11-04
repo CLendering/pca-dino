@@ -17,6 +17,7 @@ from sklearn.metrics import (
     precision_recall_curve,
     average_precision_score,
 )
+from sklearn.decomposition import PCA  # <-- ADDED THIS IMPORT
 from anomalib.metrics.aupro import _AUPRO as TM_AUPRO
 
 from args import get_args, parse_layer_indices, parse_grouped_layers
@@ -35,9 +36,9 @@ from patching import process_image_patched, get_patch_coords
 from augmentations import get_augmentation_transform
 
 # change from 42
-torch.manual_seed(2)
-np.random.seed(2)
-random.seed(2)
+torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 print(f"Using device: {DEVICE}")
@@ -569,28 +570,49 @@ def main():
                         anomaly_maps[background_mask] = 0.0
 
                     elif args.bg_mask_method == "pca_normality":
-                        pc1_map_flat = get_pc_projection_map(tokens_reshaped, pca_params, 0)
-                        pc1_map = pc1_map_flat.reshape(b, h_p, w_p)
-                        background_mask = np.zeros_like(anomaly_maps, dtype=bool)
+                        # --- [START] NEW MASKING STRATEGY (VALIDATION) ---
+                        # This logic fits PCA to each image's features individually.
+                        threshold = 10.0  # Hardcoded from user snippet
+                        kernel_size = 3   # Hardcoded from user snippet
+                        border = 0.2    # Hardcoded from user snippet
+                        grid_size = (h_p, w_p)
+                        kernel = np.ones((kernel_size, kernel_size), np.uint8) # Pre-define kernel
+
+                        background_mask_batch = np.zeros_like(anomaly_maps, dtype=bool)
+
                         for j in range(b):
-                            pc1_map_img = pc1_map[j]
+                            # Get features for the j-th image: [H*W, C]
+                            img_features = tokens[j].reshape(-1, c)
+
                             try:
-                                if args.mask_threshold_method == "percentile":
-                                    threshold = np.percentile(
-                                        pc1_map_img, args.percentile_threshold * 100
-                                    )
-                                    background_mask[j] = pc1_map_img < threshold
-                                else: # otsu
-                                    norm_mask = cv2.normalize(
-                                        pc1_map_img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
-                                    )
-                                    _, binary_mask = cv2.threshold(
-                                        norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-                                    )
-                                    background_mask[j] = binary_mask == 0
+                                pca = PCA(n_components=1, svd_solver='randomized')
+                                first_pc = pca.fit_transform(img_features.astype(np.float32))
+
+                                # Initial foreground mask
+                                mask = first_pc > threshold
+                                mask_2d = mask.reshape(grid_size)
+
+                                # Adaptive masking check
+                                h_start, h_end = int(grid_size[0] * border), int(grid_size[0] * (1 - border))
+                                w_start, w_end = int(grid_size[1] * border), int(grid_size[1] * (1 - border))
+                                m = mask_2d[h_start:h_end, w_start:w_end]
+
+                                if m.sum() <= m.size * 0.35:
+                                    mask = -first_pc > threshold
+                                    mask_2d = mask.reshape(grid_size) # Re-reshape if flipped
+
+                                # Post-process foreground mask
+                                mask_processed = cv2.dilate(mask_2d.astype(np.uint8), kernel).astype(bool)
+                                mask_processed = cv2.morphologyEx(mask_processed.astype(np.uint8), cv2.MORPH_CLOSE, kernel).astype(bool)
+
+                                # Invert the foreground mask to get the background mask
+                                background_mask_batch[j] = ~mask_processed
+
                             except Exception as e:
                                 logging.warning(f"PCA mask failed for val image {j}: {e}. Skipping mask.")
-                        anomaly_maps[background_mask] = 0.0
+                        
+                        anomaly_maps[background_mask_batch] = 0.0
+                        # --- [END] NEW MASKING STRATEGY (VALIDATION) ---
                     # --- End Masking ---
 
 
@@ -881,28 +903,51 @@ def main():
                     anomaly_maps[background_mask] = 0.0
 
                 elif args.bg_mask_method == "pca_normality":
-                    pc1_map_flat = get_pc_projection_map(tokens_reshaped, pca_params, 0)
-                    pc1_map = pc1_map_flat.reshape(b, h_p, w_p)
-                    mask_for_viz = pc1_map # Save raw PC1 map for viz
+                    # --- [START] NEW MASKING STRATEGY (TEST) ---
+                    threshold = 10.0  # Hardcoded from user snippet
+                    kernel_size = 3   # Hardcoded from user snippet
+                    border = 0.2    # Hardcoded from user snippet
+                    grid_size = (h_p, w_p)
+                    kernel = np.ones((kernel_size, kernel_size), np.uint8) # Pre-define kernel
+
+                    background_mask_batch = np.zeros_like(anomaly_maps, dtype=bool)
+                    mask_for_viz = np.zeros_like(anomaly_maps) # Initialize viz mask
+
                     for j in range(b):
-                        pc1_map_img = pc1_map[j]
+                        # Get features for the j-th image: [H*W, C]
+                        img_features = tokens[j].reshape(-1, c)
+
                         try:
-                            if args.mask_threshold_method == "percentile":
-                                threshold = np.percentile(
-                                    pc1_map_img, args.percentile_threshold * 100
-                                )
-                                background_mask[j] = pc1_map_img < threshold
-                            else: # otsu
-                                norm_mask = cv2.normalize(
-                                    pc1_map_img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
-                                )
-                                _, binary_mask = cv2.threshold(
-                                    norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-                                )
-                                background_mask[j] = binary_mask == 0
+                            pca = PCA(n_components=1, svd_solver='randomized')
+                            first_pc = pca.fit_transform(img_features.astype(np.float32))
+
+                            # Initial foreground mask
+                            mask = first_pc > threshold
+                            mask_2d = mask.reshape(grid_size)
+
+                            # Adaptive masking check
+                            h_start, h_end = int(grid_size[0] * border), int(grid_size[0] * (1 - border))
+                            w_start, w_end = int(grid_size[1] * border), int(grid_size[1] * (1 - border))
+                            m = mask_2d[h_start:h_end, w_start:w_end]
+
+                            if m.sum() <= m.size * 0.35:
+                                mask = -first_pc > threshold
+                                mask_2d = mask.reshape(grid_size) # Re-reshape if flipped
+
+                            # Post-process foreground mask
+                            mask_processed = cv2.dilate(mask_2d.astype(np.uint8), kernel).astype(bool)
+                            mask_processed = cv2.morphologyEx(mask_processed.astype(np.uint8), cv2.MORPH_CLOSE, kernel).astype(bool)
+
+                            # Invert the foreground mask to get the background mask
+                            background_mask_batch[j] = ~mask_processed
+                            # Save the *foreground* mask for visualization
+                            mask_for_viz[j] = mask_processed.astype(np.float32)
+
                         except Exception as e:
                             logging.warning(f"PCA mask failed for test image {j}: {e}. Skipping mask.")
-                    anomaly_maps[background_mask] = 0.0
+
+                    anomaly_maps[background_mask_batch] = 0.0
+                    # --- [END] NEW MASKING STRATEGY (TEST) ---
                 # --- End Masking ---
 
                 for j in range(anomaly_maps.shape[0]):
@@ -1007,8 +1052,17 @@ def main():
                             if mask_for_viz is not None:
                                 # Get the raw mask for this specific image
                                 raw_mask_map = mask_for_viz[j]
+                                
+                                # --- This logic is different from the old 'percentile' logic ---
+                                # The new logic already created a binary mask in 'mask_for_viz[j]'
+                                # The old logic was thresholding a raw saliency map.
+                                # Here, we just resize the binary mask we already made.
                                 try:
-                                    if args.mask_threshold_method == "percentile":
+                                    if args.bg_mask_method == "pca_normality":
+                                        # mask_for_viz[j] is already the binary foreground mask
+                                        binary_mask = mask_for_viz[j] 
+                                    
+                                    elif args.mask_threshold_method == "percentile":
                                         threshold_val = np.percentile(
                                             raw_mask_map, args.percentile_threshold * 100
                                         )

@@ -56,6 +56,31 @@ class MVTecADDataset(BaseDatasetHandler):
         )
 
 
+class VisASimpleDataset(BaseDatasetHandler):
+    """Handler for VisA dataset with structure:
+    category/
+    ├── ground_truth/bad/*.png
+    ├── test/{good,bad}/*.JPG
+    └── train/good/*.JPG
+    """
+
+    def get_train_paths(self):
+        return sorted(glob.glob(str(self.category_path / "train" / "good" / "*.JPG")))
+
+    def get_test_paths(self):
+        # include both good and bad
+        return sorted(glob.glob(str(self.category_path / "test" / "*" / "*.JPG")))
+
+    def get_ground_truth_path(self, test_path: str):
+        p = Path(test_path)
+        # only bad samples have masks
+        if "bad" in p.parts:
+            mask_path = self.category_path / "ground_truth" / "bad" / f"{p.stem}.png"
+            if mask_path.exists():
+                return str(mask_path)
+        # good samples → no ground truth
+        return None
+
 class MVTecAD2Dataset(BaseDatasetHandler):
     """Handler for the MVTec AD 2 dataset structure."""
 
@@ -175,7 +200,7 @@ def get_dataset_handler(name: str, root_path: str, category: str) -> BaseDataset
     elif name == "mvtec_ad2":
         return MVTecAD2Dataset(root_path, category)
     elif name == "visa":
-        return VisADataset(root_path, category)
+        return VisASimpleDataset(root_path, category)
     elif name == "blade30":
         return Blade30Dataset(root_path, category)
     else:
