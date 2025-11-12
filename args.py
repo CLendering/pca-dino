@@ -71,7 +71,7 @@ def get_args():
     parser.add_argument(
         "--layers",
         type=str,
-        default="-13,-14,-15,-16,-17,-18,-19",
+        default="-12,-13,-14,-15,-16,-17,-18",
         help="Comma-separated layer indices for 'concat' or 'mean' aggregation.",
     )
     parser.add_argument(
@@ -122,6 +122,12 @@ def get_args():
         help="Explained variance to retain for PCA. Used if --pca_dim is None.",
     )
     parser.add_argument("--whiten", action="store_true", help="Apply whitening in PCA.")
+
+    parser.add_argument(
+        "--save_intro_overlays",
+        action="store_true",
+        help="Save clean overlay images for the introductory figure.",
+    )
 
     # --- Kernel PCA Arguments ---
     parser.add_argument(
@@ -175,7 +181,7 @@ def get_args():
     parser.add_argument(
         "--bg_mask_method",
         type=str,
-        default="pca_normality",
+        default=None,
         choices=[None, "dino_saliency", "pca_normality"],
         help="Method to use for background masking. 'dino_saliency' uses DINO attention. "
         "'pca_normality' uses PC1 projection (AnomalyDINO style). "
@@ -224,13 +230,13 @@ def get_args():
     parser.add_argument(
         "--outdir",
         type=str,
-        default="./results_final_visALayout",
+        default="./results_full_shot",
         help="Directory to save results, logs, and visualizations.",
     )
     parser.add_argument(
         "--vis_count",
         type=int,
-        default=10,
+        default=0,
         help="Number of anomalous examples to visualize per category.",
     )
     parser.add_argument(
@@ -243,6 +249,13 @@ def get_args():
         type=int,
         default=None,
         help="Run in debug mode on a subset of N images.",
+    )
+
+    parser.add_argument(
+        "--batched_zero_shot",
+        action="store_true",
+        help="Run in batched zero-shot mode. This will fit the PCA model on the "
+             "entire test set for each category, ignoring k-shot/train data."
     )
 
     args = parser.parse_args()

@@ -1,6 +1,7 @@
 import os
 import math
 import logging
+import time
 from pathlib import Path
 
 import numpy as np
@@ -30,7 +31,7 @@ from dataclass import get_dataset_handler
 from features import FeatureExtractor
 from pca import PCAModel, KernelPCAModel, get_pc_projection_map
 from score import calculate_anomaly_scores, post_process_map
-from viz import save_visualization
+from viz import save_visualization, save_overlay_for_intro
 from specular import specular_mask_torch, filter_specular_anomalies
 from patching import process_image_patched, get_patch_coords
 from augmentations import get_augmentation_transform
@@ -116,6 +117,7 @@ def main():
     run_name += f"_score-{args.score_method}"
     run_name += f"_clahe{int(args.use_clahe)}"
     run_name += f"_dropk{args.drop_k}"
+    run_name += f"_model-{args.model_ckpt.split('/')[-1]}"
     run_name += (
         f"pca_ev{args.pca_ev}" if args.pca_ev is not None else f"_pca_dim{args.pca_dim}"
     )
@@ -186,6 +188,12 @@ def main():
         if not train_paths:
             logging.warning(f"No training images found for {category}. Skipping.")
             continue
+
+        if args.batched_zero_shot:
+            # --- BATCHED 0-SHOT LOGIC ---
+            logging.info(f"--- Batched 0-Shot Mode: Fitting PCA on {len(test_paths)} test images ---")
+            train_paths = test_paths.copy()
+            val_paths = None
 
         # --- K-Shot Sampling ---
         if args.k_shot is not None:
@@ -722,6 +730,50 @@ def main():
             logging.warning("No validation set found. F1 scores will be N/A.")
             thr_img, thr_px = None, None
 
+        # --- WARM-UP RUN ---
+        if test_paths:
+            logging.info("Performing warm-up inference run...")
+            try:
+                # Use the first test image for the warm-up
+                dummy_img = [Image.open(test_paths[0]).convert("RGB")]
+                
+                if args.patch_size:
+                    # Warm-up the patch pipeline
+                    _ = process_image_patched(
+                        dummy_img, extractor, pca_params, args, DEVICE, h_p, w_p, feature_dim
+                    )
+                else:
+                    # Warm-up the full-image pipeline
+                    _tokens, (_h, _w), _saliency = extractor.extract_tokens(
+                        dummy_img,
+                        args.image_res,
+                        layers,
+                        args.agg_method,
+                        grouped_layers,
+                        args.docrop,
+                        is_cosine=(args.score_method == "cosine"),
+                        use_clahe=args.use_clahe,
+                        dino_saliency_layer=args.dino_saliency_layer,
+                    )
+                    # A minimal version of the scoring
+                    _scores = calculate_anomaly_scores(
+                        _tokens.reshape(-1, _tokens.shape[-1]),
+                        pca_params,
+                        args.score_method,
+                        args.drop_k,
+                    )
+                    # Warm-up specular filter if used
+                    if args.use_specular_filter and torch.cuda.is_available():
+                        _ = filter_specular_anomalies(
+                            torch.from_numpy(_scores).to(DEVICE), 
+                            torch.zeros_like(torch.from_numpy(_scores)).to(DEVICE)
+                        )
+
+                torch.cuda.synchronize(DEVICE)
+                logging.info("Warm-up complete.")
+            except Exception as e:
+                logging.warning(f"Warm-up run failed: {e}. First timed run may be slow.")
+
         # 3. Evaluate on Test Set
         logging.info(f"Evaluating on {len(test_paths)} test images...")
         img_true, img_pred_f1 = [], []
@@ -732,7 +784,12 @@ def main():
         anomalous_gt_masks = []
         anomalous_anomaly_maps = []  # NORMALIZED maps for AUPRO
         vis_saved_count = 0
+        all_inference_times = []
 
+
+        logging.info("Number of test images: {}".format(len(test_paths)))
+
+       # --- BEGIN REFACTORED TEST LOOP ---
         test_iter = tqdm(test_paths, desc=f"Testing {category}")
         for i in range(0, len(test_paths), args.batch_size):
             path_batch = test_paths[i : i + args.batch_size]
@@ -741,19 +798,31 @@ def main():
                 "good" not in str(p) and "Normal" not in str(p) for p in path_batch
             ]
 
+            # logging.info(f"{path_batch}, is_anomaly: {is_anomaly_batch}")
+
+            # --- START TIMING ---
+            torch.cuda.synchronize(DEVICE)
+            start_time = time.perf_counter()
+
+            # --- 1. COMPUTATION STAGE (Image -> Final Anomaly Map) ---
+            
+            final_anomaly_maps_for_batch = []
+            saliency_maps_for_viz_batch = [] # For visualization
+
             if args.patch_size:
+                # process_image_patched does steps 1-4 (extract, score, mask, post-process)
                 (
-                    anomaly_maps_batch,
+                    anomaly_maps_batch, # These are pre-specular
                     saliency_maps_batch,
                 ) = process_image_patched(
                     pil_imgs, extractor, pca_params, args, DEVICE, h_p, w_p, feature_dim
                 )
-                for j, anomaly_map_final in enumerate(anomaly_maps_batch):
-                    is_anomaly = is_anomaly_batch[j]
-                    path = path_batch[j]
-                    pil_img = pil_imgs[j]
-                    saliency_map_final = saliency_maps_batch[j] # This is the stitched saliency map
-
+                
+                saliency_maps_for_viz_batch = saliency_maps_batch # Store stitched saliency maps
+                
+                for j, anomaly_map_pre_specular in enumerate(anomaly_maps_batch):
+                    anomaly_map_final = anomaly_map_pre_specular
+                    # Step 5: Specular Filter (if enabled)
                     if args.use_specular_filter:
                         img_tensor = TF.to_tensor(pil_imgs[j]).unsqueeze(0).to(DEVICE)
                         _, _, conf = specular_mask_torch(
@@ -761,99 +830,24 @@ def main():
                         )
                         conf = torch.nn.functional.interpolate(
                             conf,
-                            size=anomaly_map_final.shape,
+                            size=anomaly_map_pre_specular.shape,
                             mode="bilinear",
                             align_corners=False,
                         )
                         conf_map = conf.squeeze().cpu().numpy()
                         anomaly_map_final = (
-                            filter_specular_anomalies(anomaly_map_final, conf_map)
+                            filter_specular_anomalies(anomaly_map_pre_specular, conf_map)
                             .cpu()
                             .numpy()
                         )
+                    final_anomaly_maps_for_batch.append(anomaly_map_final)
 
-                    # --- IMAGE METRICS (I-AUROC, I-F1) ---
-                    if args.img_score_agg == "max":
-                        img_score = np.max(anomaly_map_final)
-                    elif args.img_score_agg == "p99":
-                        img_score = np.percentile(anomaly_map_final, 99)
-                    elif args.img_score_agg == "mtop5":
-                        img_score = np.mean(np.sort(anomaly_map_final.flatten())[-5:])
-                    elif args.img_score_agg == "mtop1p":
-                        img_score = topk_mean(anomaly_map_final, frac=0.01)
-                    else:
-                        img_score = np.mean(anomaly_map_final)
-
-                    img_true.append(1 if is_anomaly else 0)
-                    img_pred_auroc.append(float(img_score))
-                    if thr_img is not None:
-                        img_pred_f1.append(1 if img_score >= thr_img else 0)
-
-                    # --- PIXEL METRICS (AUPRO, P-F1) ---
-                    anomaly_map_normalized = min_max_norm(anomaly_map_final)
-                    H, W = anomaly_map_normalized.shape
-
-                    gt_mask = handler.get_ground_truth_mask(path, pil_img.size)
-                    gt_mask = (
-                        np.array(
-                            Image.fromarray(gt_mask.astype(np.uint8) * 255).resize(
-                                (W, H), resample=Image.NEAREST
-                            )
-                        )
-                        > 127
-                    )
-
-                    px_true_all.extend(gt_mask.flatten().astype(np.uint8))
-                    px_pred_all_auroc.extend(
-                        anomaly_map_final.flatten().astype(np.float32)
-                    )
-                    px_pred_all_normalized.extend(
-                        anomaly_map_normalized.flatten().astype(np.float32)
-                    )
-
-                    if is_anomaly:
-                        anomalous_gt_masks.append(gt_mask)
-                        anomalous_anomaly_maps.append(anomaly_map_normalized)
-                        if vis_saved_count < args.vis_count:
-                            vis_img = pil_img
-                            
-                            saliency_map_for_viz = None
-                            if args.bg_mask_method is not None:
-                                try:
-                                    # saliency_map_final is the raw, stitched saliency map
-                                    if args.mask_threshold_method == "percentile":
-                                        threshold_val = np.percentile(
-                                            saliency_map_final, args.percentile_threshold * 100
-                                        )
-                                        saliency_map_for_viz = (saliency_map_final >= threshold_val).astype(np.float32)
-                                    else: # otsu
-                                        norm_mask = cv2.normalize(
-                                            saliency_map_final, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
-                                        )
-                                        _, binary_mask = cv2.threshold(
-                                            norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-                                        )
-                                        saliency_map_for_viz = (binary_mask > 0).astype(np.float32)
-
-                                except Exception as e:
-                                    logging.warning(f"Saliency mask percentile calculation failed for visualization (patching): {e}.")
-
-                            save_visualization(
-                                path,
-                                vis_img,
-                                gt_mask,
-                                anomaly_map_normalized,
-                                args.outdir,
-                                category,
-                                vis_saved_count,
-                                saliency_mask=saliency_map_for_viz, # Pass the binary mask
-                            )
-                            vis_saved_count += 1
             else: # Full-image mode
+                # Step 1: Feature Extraction
                 (
                     tokens,
                     (h_p, w_p),
-                    saliency_masks_batch,
+                    saliency_masks_batch, # Raw token-level saliency
                 ) = extractor.extract_tokens(
                     pil_imgs,
                     args.image_res,
@@ -868,6 +862,7 @@ def main():
                 b, _, _, c = tokens.shape
                 tokens_reshaped = tokens.reshape(b * h_p * w_p, c)
 
+                # Step 2: Anomaly Scoring
                 scores = calculate_anomaly_scores(
                     tokens_reshaped,
                     pca_params,
@@ -876,8 +871,8 @@ def main():
                 )
                 anomaly_maps = scores.reshape(b, h_p, w_p)
 
-                # --- Apply Masking Strategy (Test) ---
-                mask_for_viz = None # Initialize mask for visualization
+                # Step 3: Masking Strategy (Test)
+                mask_for_viz = None # This will store the raw saliency/normality map
                 background_mask = np.zeros_like(anomaly_maps, dtype=bool)
 
                 if args.bg_mask_method == "dino_saliency":
@@ -900,65 +895,53 @@ def main():
                                 background_mask[j] = binary_mask == 0
                         except Exception as e:
                             logging.warning(f"Saliency mask failed for test image {j}: {e}. Skipping mask.")
-                    anomaly_maps[background_mask] = 0.0
-
+                
                 elif args.bg_mask_method == "pca_normality":
-                    # --- [START] NEW MASKING STRATEGY (TEST) ---
-                    threshold = 10.0  # Hardcoded from user snippet
-                    kernel_size = 3   # Hardcoded from user snippet
-                    border = 0.2    # Hardcoded from user snippet
+                    threshold = 10.0
+                    kernel_size = 3
+                    border = 0.2
                     grid_size = (h_p, w_p)
-                    kernel = np.ones((kernel_size, kernel_size), np.uint8) # Pre-define kernel
-
-                    background_mask_batch = np.zeros_like(anomaly_maps, dtype=bool)
-                    mask_for_viz = np.zeros_like(anomaly_maps) # Initialize viz mask
+                    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+                    mask_for_viz = np.zeros_like(anomaly_maps) # This will store the *binary* FG mask
 
                     for j in range(b):
-                        # Get features for the j-th image: [H*W, C]
                         img_features = tokens[j].reshape(-1, c)
-
                         try:
                             pca = PCA(n_components=1, svd_solver='randomized')
                             first_pc = pca.fit_transform(img_features.astype(np.float32))
-
-                            # Initial foreground mask
                             mask = first_pc > threshold
                             mask_2d = mask.reshape(grid_size)
 
-                            # Adaptive masking check
                             h_start, h_end = int(grid_size[0] * border), int(grid_size[0] * (1 - border))
                             w_start, w_end = int(grid_size[1] * border), int(grid_size[1] * (1 - border))
                             m = mask_2d[h_start:h_end, w_start:w_end]
 
                             if m.sum() <= m.size * 0.35:
                                 mask = -first_pc > threshold
-                                mask_2d = mask.reshape(grid_size) # Re-reshape if flipped
+                                mask_2d = mask.reshape(grid_size)
 
-                            # Post-process foreground mask
                             mask_processed = cv2.dilate(mask_2d.astype(np.uint8), kernel).astype(bool)
                             mask_processed = cv2.morphologyEx(mask_processed.astype(np.uint8), cv2.MORPH_CLOSE, kernel).astype(bool)
-
-                            # Invert the foreground mask to get the background mask
-                            background_mask_batch[j] = ~mask_processed
-                            # Save the *foreground* mask for visualization
+                            
+                            background_mask[j] = ~mask_processed
                             mask_for_viz[j] = mask_processed.astype(np.float32)
-
                         except Exception as e:
                             logging.warning(f"PCA mask failed for test image {j}: {e}. Skipping mask.")
 
-                    anomaly_maps[background_mask_batch] = 0.0
-                    # --- [END] NEW MASKING STRATEGY (TEST) ---
-                # --- End Masking ---
-
+                anomaly_maps[background_mask] = 0.0 # Apply background mask
+                
+                saliency_maps_for_viz_batch = mask_for_viz # Store for viz loop
+                
                 for j in range(anomaly_maps.shape[0]):
                     pil_img = pil_imgs[j]
-                    is_anomaly = is_anomaly_batch[j]
-                    path = path_batch[j]
-
-                    anomaly_map_final = post_process_map(
+                    
+                    # Step 4: Post-processing
+                    anomaly_map_pre_specular = post_process_map(
                         anomaly_maps[j], args.image_res
                     )
 
+                    # Step 5: Specular Filter (if enabled)
+                    anomaly_map_final = anomaly_map_pre_specular
                     if args.use_specular_filter:
                         img_tensor = TF.to_tensor(pil_imgs[j]).unsqueeze(0).to(DEVICE)
                         _, _, conf = specular_mask_torch(
@@ -976,93 +959,115 @@ def main():
                             .cpu()
                             .numpy()
                         )
+                    final_anomaly_maps_for_batch.append(anomaly_map_final)
+            
+            # --- END TIMING ---
+            torch.cuda.synchronize(DEVICE)
+            end_time = time.perf_counter()
+            all_inference_times.append(end_time - start_time)
+            
+            # --- 2. METRICS & VISUALIZATION STAGE (Not Timed) ---
+            
+            for j, anomaly_map_final in enumerate(final_anomaly_maps_for_batch):
+                is_anomaly = is_anomaly_batch[j]
+                logging.info(f"Processing test image: {path_batch[j]}, is_anomaly: {is_anomaly}")
+                path = path_batch[j]
+                pil_img = pil_imgs[j]
 
-                    # --- IMAGE METRICS (I-AUROC, I-F1) ---
-                    if args.img_score_agg == "max":
-                        img_score = np.max(anomaly_map_final)
-                    elif args.img_score_agg == "p99":
-                        img_score = np.percentile(anomaly_map_final, 99)
-                    elif args.img_score_agg == "mtop5":
-                        img_score = np.mean(np.sort(anomaly_map_final.flatten())[-5:])
-                    elif args.img_score_agg == "mtop1p":
-                        img_score = topk_mean(anomaly_map_final, frac=0.01)
-                    else:
-                        img_score = np.mean(anomaly_map_final)
+                # --- IMAGE METRICS (I-AUROC, I-F1) ---
+                if args.img_score_agg == "max":
+                    img_score = np.max(anomaly_map_final)
+                elif args.img_score_agg == "p99":
+                    img_score = np.percentile(anomaly_map_final, 99)
+                elif args.img_score_agg == "mtop5":
+                    img_score = np.mean(np.sort(anomaly_map_final.flatten())[-5:])
+                elif args.img_score_agg == "mtop1p":
+                    img_score = topk_mean(anomaly_map_final, frac=0.01)
+                else:
+                    img_score = np.mean(anomaly_map_final)
 
-                    img_true.append(1 if is_anomaly else 0)
-                    img_pred_auroc.append(float(img_score))
-                    if thr_img is not None:
-                        img_pred_f1.append(1 if img_score >= thr_img else 0)
+                img_true.append(1 if is_anomaly else 0)
+                img_pred_auroc.append(float(img_score))
+                if thr_img is not None:
+                    img_pred_f1.append(1 if img_score >= thr_img else 0)
 
-                    # --- PIXEL METRICS (AUPRO, P-F1) ---
-                    anomaly_map_normalized = min_max_norm(anomaly_map_final)
-                    H, W = anomaly_map_normalized.shape
+                # --- PIXEL METRICS (AUPRO, P-F1) ---
+                anomaly_map_normalized = min_max_norm(anomaly_map_final)
+                H, W = anomaly_map_normalized.shape
 
-                    # --- Ground Truth Mask Handling ---
-                    gt_path_str = handler.get_ground_truth_path(path)
-
-                    if not gt_path_str or not os.path.exists(gt_path_str):
-                        gt_mask = np.zeros((H, W), dtype=np.uint8)
-                    else:
-                        gt_mask_pil = Image.open(gt_path_str).convert("L")
-
-                        if args.docrop:
-                            resize_res = int(args.image_res / 0.875)
-                            gt_mask_pil = TF.resize(
-                                gt_mask_pil,
-                                (resize_res, resize_res),
-                                interpolation=TF.InterpolationMode.NEAREST,
-                            )
-                            gt_mask_pil = TF.center_crop(
-                                gt_mask_pil, (args.image_res, args.image_res)
-                            )
-
+                # --- Ground Truth Mask Handling (I/O) ---
+                gt_path_str = handler.get_ground_truth_path(path)
+                if not gt_path_str or not os.path.exists(gt_path_str):
+                    gt_mask = np.zeros((H, W), dtype=np.uint8)
+                else:
+                    gt_mask_pil = Image.open(gt_path_str).convert("L")
+                    if args.docrop:
+                        resize_res = int(args.image_res / 0.875)
                         gt_mask_pil = TF.resize(
                             gt_mask_pil,
-                            (H, W),
+                            (resize_res, resize_res),
                             interpolation=TF.InterpolationMode.NEAREST,
                         )
-                        gt_mask = (np.array(gt_mask_pil) > 0).astype(np.uint8)
-
-                    px_true_all.extend(gt_mask.flatten().astype(np.uint8))
-                    px_pred_all_auroc.extend(
-                        anomaly_map_final.flatten().astype(np.float32)
+                        gt_mask_pil = TF.center_crop(
+                            gt_mask_pil, (args.image_res, args.image_res)
+                        )
+                    gt_mask_pil = TF.resize(
+                        gt_mask_pil,
+                        (H, W),
+                        interpolation=TF.InterpolationMode.NEAREST,
                     )
-                    px_pred_all_normalized.extend(
-                        anomaly_map_normalized.flatten().astype(np.float32)
-                    )
+                    gt_mask = (np.array(gt_mask_pil) > 0).astype(np.uint8)
 
-                    if is_anomaly:
-                        anomalous_gt_masks.append(gt_mask)
-                        anomalous_anomaly_maps.append(anomaly_map_normalized)
-                        if vis_saved_count < args.vis_count:
-                            vis_img = pil_img
-                            if args.docrop:
-                                resize_res = int(args.image_res / 0.875)
-                                vis_img = TF.resize(
-                                    vis_img,
-                                    (resize_res, resize_res),
-                                    interpolation=TF.InterpolationMode.BICUBIC,
-                                )
-                                vis_img = TF.center_crop(
-                                    vis_img, (args.image_res, args.image_res)
-                                )
+                px_true_all.extend(gt_mask.flatten().astype(np.uint8))
+                px_pred_all_auroc.extend(
+                    anomaly_map_final.flatten().astype(np.float32)
+                )
+                px_pred_all_normalized.extend(
+                    anomaly_map_normalized.flatten().astype(np.float32)
+                )
 
-                            saliency_map_for_viz = None
-                            if mask_for_viz is not None:
-                                # Get the raw mask for this specific image
-                                raw_mask_map = mask_for_viz[j]
+                if is_anomaly:
+                    anomalous_gt_masks.append(gt_mask)
+                    anomalous_anomaly_maps.append(anomaly_map_normalized)
+
+                    if args.save_intro_overlays:
+                        vis_img = pil_img
+                        save_overlay_for_intro(
+                            path,
+                            vis_img, 
+                            anomaly_map_normalized,
+                            args.outdir,
+                            category,
+                        )
+                    
+                    # --- Visualization (I/O) ---
+                    if vis_saved_count < args.vis_count:
+                        vis_img = pil_img
+                        if args.docrop and not args.patch_size: # Docrop for viz only in full-image
+                            resize_res = int(args.image_res / 0.875)
+                            vis_img = TF.resize(
+                                vis_img,
+                                (resize_res, resize_res),
+                                interpolation=TF.InterpolationMode.BICUBIC,
+                            )
+                            vis_img = TF.center_crop(
+                                vis_img, (args.image_res, args.image_res)
+                            )
+                        
+                        # --- Process Saliency Mask for Viz ---
+                        saliency_map_for_viz = None
+                        raw_mask_map = None
+                        if saliency_maps_for_viz_batch is not None:
+                            raw_mask_map = saliency_maps_for_viz_batch[j]
+                        
+                        if raw_mask_map is not None:
+                            try:
+                                if args.bg_mask_method == "pca_normality":
+                                    # mask_for_viz was already the binary foreground mask
+                                    binary_mask = raw_mask_map
                                 
-                                # --- This logic is different from the old 'percentile' logic ---
-                                # The new logic already created a binary mask in 'mask_for_viz[j]'
-                                # The old logic was thresholding a raw saliency map.
-                                # Here, we just resize the binary mask we already made.
-                                try:
-                                    if args.bg_mask_method == "pca_normality":
-                                        # mask_for_viz[j] is already the binary foreground mask
-                                        binary_mask = mask_for_viz[j] 
-                                    
-                                    elif args.mask_threshold_method == "percentile":
+                                elif args.bg_mask_method == "dino_saliency":
+                                    if args.mask_threshold_method == "percentile":
                                         threshold_val = np.percentile(
                                             raw_mask_map, args.percentile_threshold * 100
                                         )
@@ -1075,28 +1080,58 @@ def main():
                                             norm_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
                                         )
                                         binary_mask = (binary_mask_u8 > 0).astype(np.float32)
-
-                                    # Resize the binary mask to the visualization size
-                                    saliency_map_for_viz = post_process_map(
-                                        binary_mask,
-                                        anomaly_map_normalized.shape,
-                                        blur=False,
-                                    )
-                                except Exception as e:
-                                     logging.warning(f"Saliency mask percentile calculation failed for visualization: {e}.")
-                                     
-                            save_visualization(
-                                path,
-                                vis_img,
-                                gt_mask,
-                                anomaly_map_normalized,
-                                args.outdir,
-                                category,
-                                vis_saved_count,
-                                saliency_mask=saliency_map_for_viz, # Pass the (optional) binary mask
-                            )
-                            vis_saved_count += 1
+                                
+                                # Resize the binary mask to the visualization size
+                                saliency_map_for_viz = post_process_map(
+                                    binary_mask,
+                                    anomaly_map_normalized.shape, # (H, W)
+                                    blur=False,
+                                )
+                            except Exception as e:
+                                    logging.warning(f"Saliency mask processing failed for visualization: {e}.")
+                        
+                        save_visualization(
+                            path,
+                            vis_img,
+                            gt_mask,
+                            anomaly_map_normalized,
+                            args.outdir,
+                            category,
+                            vis_saved_count,
+                            saliency_mask=saliency_map_for_viz,
+                        )
+                        vis_saved_count += 1
+            
             test_iter.update(len(path_batch))
+        
+        # --- END REFACTORED TEST LOOP ---
+
+        # 4. Calculate Metrics
+
+        # --- REPORT TIMINGS ---
+        if all_inference_times:
+            times_arr = np.array(all_inference_times)
+            total_images_processed = len(test_paths)
+            total_time = np.sum(times_arr)
+            
+            avg_time_per_image = total_time / total_images_processed
+            images_per_second = 1.0 / avg_time_per_image
+
+            logging.info(f"--- Timing Results for {category} ---")
+            logging.info(f"Total test images: {total_images_processed}")
+            logging.info(f"Batch size: {args.batch_size} (Processed {len(all_inference_times)} batches)")
+            logging.info(f"Total inference time: {total_time:.4f} s")
+            logging.info(f"Avg. time per image: {avg_time_per_image:.6f} s")
+            logging.info(f"Images per second (FPS): {images_per_second:.2f}")
+            
+            # Report batch stats (excluding first batch, as it was pre-warmed)
+            if len(times_arr) > 1:
+                times_arr_stats = times_arr[1:]
+                logging.info(f"Avg. time per batch (excl. 1st): {np.mean(times_arr_stats):.6f} s")
+                logging.info(f"Median time per batch (excl. 1st): {np.median(times_arr_stats):.6f} s")
+            else:
+                 logging.info(f"Avg. time per batch: {np.mean(times_arr):.6f} s")
+        # --- END REPORT ---
 
         # 4. Calculate Metrics
 
