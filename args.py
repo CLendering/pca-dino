@@ -122,6 +122,13 @@ def get_args():
         default=["rotate"],
         help="List of augmentations to apply. Choices: hflip, vflip, rotate, color_jitter, affine.",
     )
+    aug_group.add_argument(
+        "--no_aug_categories",
+        type=str,
+        nargs="+",
+        default=['transistor'],
+        help="List of categories for which augmentations should be disabled.",
+    )
 
     # --- Anomaly Detection (PCA) Arguments ---
     pca_group.add_argument(

@@ -687,11 +687,11 @@ def main():
         test_paths = handler.get_test_paths()
 
         current_aug_transform = aug_transform
-        if category.lower() == "transistor":
+        if category.lower() in args.no_aug_categories:
             if current_aug_transform is not None:
                 logging.info(f"Disabling augmentations for the '{category}' category.")
             current_aug_transform = None
-            
+
         if args.debug_limit is not None:
             logging.warning(f"--- DEBUG MODE: Limiting to {args.debug_limit} images ---")
             if val_paths:
