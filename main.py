@@ -686,6 +686,12 @@ def main():
         val_paths = handler.get_validation_paths()
         test_paths = handler.get_test_paths()
 
+        current_aug_transform = aug_transform
+        if category.lower() == "transistor":
+            if current_aug_transform is not None:
+                logging.info(f"Disabling augmentations for the '{category}' category.")
+            current_aug_transform = None
+            
         if args.debug_limit is not None:
             logging.warning(f"--- DEBUG MODE: Limiting to {args.debug_limit} images ---")
             if val_paths:
@@ -709,7 +715,7 @@ def main():
 
         # 1. Fit PCA Model
         pca_params, h_p, w_p, feature_dim = fit_pca_model(
-            train_paths, extractor, aug_transform, args, layers, grouped_layers
+            train_paths, extractor, current_aug_transform, args, layers, grouped_layers
         )
 
         # 2. Determine PR-optimal F1 thresholds
