@@ -7,6 +7,7 @@ from sklearn.preprocessing import StandardScaler
 
 
 class KernelPCAModel:
+    """Wraps sklearn.decomposition.KernelPCA for feature collection."""
     def __init__(self, k=None, kernel="rbf", gamma=None, eps=1e-6):
         self.k = k
         self.kernel = kernel
@@ -27,7 +28,7 @@ class KernelPCAModel:
             n_components=self.k,
             kernel=self.kernel,
             gamma=self.gamma,
-            copy_X=False,  # Saves memory by avoiding an extra copy
+            copy_X=False,  # Saves memory
         )
 
         logging.info(f"Fitting KernelPCA with kernel='{self.kernel}'...")
@@ -49,8 +50,7 @@ logging.info(f"PCAModel will use device: {device}")
 
 class PCAModel:
     """
-    Memory-efficient PCA using a two-pass streaming algorithm.
-    This version is accelerated using PyTorch for GPU computation.
+    Memory-efficient PCA using a two-pass streaming algorithm on GPU.
     Based on https://github.com/dnhkng/PCAonGPU
     """
 
@@ -59,54 +59,52 @@ class PCAModel:
         self.ev_ratio = ev
         self.whiten = whiten
         self.eps = eps
-        self.mean_ = None
+        self.mu_ = None
         self.components_ = None
-        self.explained_variance_ = None
+        self.explained_variance_ = None  # Full sorted spectrum
+        self.eigvals_ = None  # Top k eigenvalues
         self.pca_params = {}
         self.device = device
         self.dtype = torch.float64
 
-    def fit(
-        self, feature_generator, feature_dim: int, total_tokens: int, num_batches: int
-    ):
-        logging.info(f"Starting PCA fit on {self.device}...")
-
-        # Pass 1: Compute mean
-        self.mean_ = torch.zeros(feature_dim, dtype=self.dtype, device=self.device)
-
+    def _compute_mean(self, feature_generator, feature_dim, total_tokens, num_batches):
+        """Pass 1: Compute the mean of all features."""
+        logging.info("Starting PCA Pass 1/2 (Mean)...")
+        self.mu_ = torch.zeros(feature_dim, dtype=self.dtype, device=self.device)
         for batch in tqdm(
-            feature_generator(),
-            total=num_batches,
-            desc="PCA Pass 1/2 (Mean)",
+            feature_generator(), total=num_batches, desc="PCA Pass 1/2 (Mean)"
         ):
             batch_gpu = torch.from_numpy(batch).to(self.device, dtype=self.dtype)
-            self.mean_ += torch.sum(batch_gpu, axis=0)
+            self.mu_ += torch.sum(batch_gpu, axis=0)
+        self.mu_ /= total_tokens
 
-        self.mean_ /= total_tokens
-
-        # Pass 2: Compute covariance
+    def _compute_covariance(
+        self, feature_generator, feature_dim, total_tokens, num_batches
+    ):
+        """Pass 2: Compute the covariance matrix."""
+        logging.info("Starting PCA Pass 2/2 (Covariance)...")
         cov_matrix = torch.zeros(
             (feature_dim, feature_dim), dtype=self.dtype, device=self.device
         )
-
         for batch in tqdm(
-            feature_generator(),
-            total=num_batches,
-            desc="PCA Pass 2/2 (Cov)",
+            feature_generator(), total=num_batches, desc="PCA Pass 2/2 (Cov)"
         ):
             batch_gpu = torch.from_numpy(batch).to(self.device, dtype=self.dtype)
-            batch_centered = batch_gpu - self.mean_
+            batch_centered = batch_gpu - self.mu_
             cov_matrix += torch.matmul(batch_centered.T, batch_centered)
-
         cov_matrix /= total_tokens - 1
+        return cov_matrix
 
+    def _compute_eigendecomposition(self, cov_matrix):
+        """Perform eigendecomposition on the covariance matrix."""
         logging.info("Performing eigendecomposition on GPU...")
         evals, evecs = torch.linalg.eigh(cov_matrix)
-
         sorted_indices = torch.argsort(evals, descending=True)
         self.explained_variance_ = evals[sorted_indices]
-        evecs = evecs[:, sorted_indices]
+        return evecs[:, sorted_indices]
 
+    def _select_k_components(self, evecs):
+        """Select the number of components (k) based on 'ev_ratio' or 'k'."""
         if self.ev_ratio is not None and self.k is None:
             cumulative_variance = torch.cumsum(
                 self.explained_variance_, dim=0
@@ -127,35 +125,53 @@ class PCAModel:
         else:
             self.k = min(self.k, evecs.shape[1])
 
-        self.components_ = evecs[:, : self.k]  # [D, k], unscaled eigenvectors
-        self.eigvals_ = self.explained_variance_[: self.k]  # [k]
-        self.mu_ = self.mean_
+        self.components_ = evecs[:, : self.k]
+        self.eigvals_ = self.explained_variance_[: self.k]
 
+    def _build_pca_params(self):
+        """Copies GPU tensors to a CPU numpy dictionary for pipeline use."""
         self.pca_params = {
-            "mu": self.mu_.cpu().numpy().astype(np.float64),  # [D]
-            "components": self.components_.cpu().numpy().astype(np.float64),  # [D, k]
-            "eigvals": self.eigvals_.cpu().numpy().astype(np.float64),  # [k]
+            "mu": self.mu_.cpu().numpy().astype(np.float64),
+            "components": self.components_.cpu().numpy().astype(np.float64),
+            "eigvals": self.eigvals_.cpu().numpy().astype(np.float64),
             "sqrt_eig": np.sqrt(
                 self.eigvals_.cpu().numpy().astype(np.float64) + self.eps
             ),
             "k": self.k,
             "whiten": self.whiten,
             "eps": self.eps,
-            # For Mahalanobis in PC space (unwhitened Z has diag cov = eigvals):
             "cov_Z_inv": np.diag(
                 1.0 / (self.eigvals_.cpu().numpy().astype(np.float64) + self.eps)
             ),
         }
         return self.pca_params
 
+    def fit(
+        self, feature_generator, feature_dim: int, total_tokens: int, num_batches: int
+    ):
+        """
+        Orchestrates the two-pass streaming PCA fit.
+        """
+        logging.info(f"Starting PCA fit on {self.device}...")
+
+        self._compute_mean(feature_generator, feature_dim, total_tokens, num_batches)
+        
+        cov_matrix = self._compute_covariance(
+            feature_generator, feature_dim, total_tokens, num_batches
+        )
+        
+        evecs = self._compute_eigendecomposition(cov_matrix)
+        
+        self._select_k_components(evecs)
+        
+        return self._build_pca_params()
+
 
 def get_pc_projection_map(
     tokens_reshaped: np.ndarray, pca: dict, pc_index: int = 0
 ):
     """
-    Projects tokens onto a single principal component (e.g., PC1) to create a
-    'normality' map, as done in AnomalyDINO.
-    Returns a 1D score (projection value) for each token.
+    Projects tokens onto a single principal component to create a 'normality' map.
     """
     if "kpca" in pca:
         logging.warning(
@@ -177,5 +193,5 @@ def get_pc_projection_map(
     # Project centered tokens onto the component
     Z = (tokens_reshaped - mu) @ C  # [N, D] @ [D, 1] -> [N, 1]
 
-    # AnomalyDINO uses the *absolute* projection value as the normality score
+    # Use the absolute projection value as the normality score
     return np.abs(Z.flatten())

@@ -1,0 +1,49 @@
+#!/bin/bash
+#SBATCH --partition=gpu_h100     # GPU partition
+#SBATCH --gres=gpu:1             # request 1 GPU
+#SBATCH --job-name=full-shot     # Renamed job for clarity
+#SBATCH --ntasks=1               # number of tasks
+#SBATCH --cpus-per-task=4        # number of CPU cores
+#SBATCH --mem=128G               # memory per node
+#SBATCH --time=24:00:00          # walltime
+#SBATCH --output=logs/out_%j.txt # standard output
+#SBATCH --error=logs/err_%j.txt  # standard error
+
+eval "$($CONDA_EXE shell.bash hook)"
+conda activate pcadino
+
+# -----------------------------------------------------------------
+# --- 1. !! EDIT YOUR DATASET PATHS HERE !! ---
+# -----------------------------------------------------------------
+# Set the absolute path to your MVTec AD dataset directory
+MVTEC_PATH="datasets/mvtec-ad"
+
+# Set the absolute path to your VisA dataset directory
+# (e.g., /path/to/your/datasets/VisA_pytorch/1cls)
+VISA_PATH="../AnomalyDINO/VisA_pytorch/1cls/"
+# -----------------------------------------------------------------
+
+
+echo "--- Running Full-Shot (all train images) for MVTec AD ---"
+conda run -n pcadino python -u main.py \
+    --dataset_name mvtec_ad \
+    --dataset_path "$MVTEC_PATH" \
+    --image_res 448 \
+    --layers="-12,-13,-14,-15,-16,-17,-18" \
+    --model_ckpt "facebook/dinov3-vit7b16-pretrain-lvd1689m" \
+    --pca_ev 0.99 \
+    --agg_method "mean" \
+    --outdir "results_batched0shot/mvtec"
+
+echo "--- Running Full-Shot (all train images) for VisA ---"
+conda run -n pcadino python -u main.py \
+    --dataset_name visa \
+    --dataset_path "$VISA_PATH" \
+    --image_res 448 \
+    --layers="-12,-13,-14,-15,-16,-17,-18" \
+    --model_ckpt "facebook/dinov3-vit7b16-pretrain-lvd1689m" \
+    --pca_ev 0.99 \
+    --agg_method "mean" \
+    --outdir "results_batched0shot/visa"
+
+echo "--- All experiments complete ---"
