@@ -20,7 +20,7 @@ MVTEC_PATH="datasets/mvtec-ad"
 
 # Set the absolute path to your VisA dataset directory
 # (e.g., /path/to/your/datasets/VisA_pytorch/1cls)
-VISA_PATH="datasets/VisA_pytorch/1cls"
+VISA_PATH="../AnomalyDINO/VisA_pytorch/1cls/"
 # -----------------------------------------------------------------
 
 

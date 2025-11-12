@@ -51,7 +51,7 @@ def get_args():
     model_group.add_argument(
         "--model_ckpt",
         type=str,
-        default="facebook/dinov3-vit7b16-pretrain-lvd1689m",
+        default="facebook/dinov2-with-registers-large",
         help="HuggingFace model checkpoint for feature extraction.",
     )
     model_group.add_argument(
