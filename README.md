@@ -13,19 +13,18 @@
         tar -xvf VisA_20220922.tar -C data/
         ```
 
-VisA preprocessing
+**VisA preprocessing**
 - Update source and target paths inside prepare_visa_public.py to match your local layout.
 - Run preprocessing:
 ```
 python prepare_visa_public.py
 ```
-- Ensure final folder layout matches what the training/evaluation scripts expect (e.g., data/mvtec, data/visa).
 
-Scripts and paths
+**Scripts and paths**
 - Update source paths for both MvTec and VisA in ./scripts/*.sh to point to your data directories.
 - Verify any other path variables (checkpoints, outputs, logs) in the scripts.
 
-Run
+**Run**
 - Submit experiments via the provided SLURM scripts:
 ```
 sbatch scripts/benchmark_few_shot.sh      # few-shot
