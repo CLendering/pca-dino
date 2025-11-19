@@ -152,5 +152,8 @@ def generate_run_name(args: argparse.Namespace) -> str:
         if args.aug_count > 0 and args.aug_list:
             aug_str = "".join(sorted([a[0] for a in args.aug_list]))
             run_name += f"_aug{args.aug_count}x{aug_str}"
-    
+
+    if args.save_intro_overlays:
+        run_name += f"_intro-overlays"
+
     return run_name

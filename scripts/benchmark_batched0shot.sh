@@ -28,22 +28,24 @@ echo "--- Running Full-Shot (all train images) for MVTec AD ---"
 conda run -n pcadino python -u main.py \
     --dataset_name mvtec_ad \
     --dataset_path "$MVTEC_PATH" \
-    --image_res 448 \
+    --image_res 672 \
     --layers="-12,-13,-14,-15,-16,-17,-18" \
-    --model_ckpt "facebook/dinov3-vit7b16-pretrain-lvd1689m" \
+    --model_ckpt "facebook/dinov2-with-registers-giant" \
     --pca_ev 0.99 \
     --agg_method "mean" \
-    --outdir "results_batched0shot/mvtec"
+    --outdir "FINAL_results_batched0shot/mvtec_dinov2G" \
+    --batched_zero_shot
 
 echo "--- Running Full-Shot (all train images) for VisA ---"
 conda run -n pcadino python -u main.py \
     --dataset_name visa \
     --dataset_path "$VISA_PATH" \
-    --image_res 448 \
+    --image_res 672 \
     --layers="-12,-13,-14,-15,-16,-17,-18" \
-    --model_ckpt "facebook/dinov3-vit7b16-pretrain-lvd1689m" \
+    --model_ckpt "facebook/dinov2-with-registers-giant" \
     --pca_ev 0.99 \
     --agg_method "mean" \
-    --outdir "results_batched0shot/visa"
+    --outdir "FINAL_results_batched0shot/visa_dinov2G" \
+    --batched_zero_shot
 
 echo "--- All experiments complete ---"

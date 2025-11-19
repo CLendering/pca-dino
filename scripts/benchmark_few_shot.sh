@@ -24,22 +24,23 @@ VISA_PATH="../AnomalyDINO/VisA_pytorch/1cls/"
 # -----------------------------------------------------------------
 
 
-echo "--- Starting k-shot experiments for MVTec AD ---"
-for k in 1 2 4
-do
-    echo "--- Running MVTec AD k=$k ---"
-    conda run -n pcadino python -u main.py \
-        --dataset_name mvtec_ad \
-        --dataset_path "$MVTEC_PATH" \
-        --image_res 448 \
-        --k_shot $k \
-        --layers="-12,-13,-14,-15,-16,-17,-18" \
-        --model_ckpt "facebook/dinov3-vit7b16-pretrain-lvd1689m" \
-        --aug_count 30 \
-        --pca_ev 0.99 \
-        --agg_method "mean" \
-        --outdir "few_shot_results/results_k${k}_mvtec"
-done
+# echo "--- Starting k-shot experiments for MVTec AD ---"
+# for k in 1 2 4
+# do
+#     echo "--- Running MVTec AD k=$k ---"
+#     conda run -n pcadino python -u main.py \
+#         --dataset_name mvtec_ad \
+#         --dataset_path "$MVTEC_PATH" \
+#         --image_res 448 \
+#         --k_shot $k \
+#         --layers="-12,-13,-14,-15,-16,-17,-18" \
+#         --model_ckpt "facebook/dinov2-with-registers-giant" \
+#         --aug_count 30 \
+#         --pca_ev 0.99 \
+#         --agg_method "mean" \
+#         --outdir "FINAL_few_shot_results/results_k${k}_mvtec_dinov2G" \
+#         --save_intro_overlays
+# done
 
 
 echo "--- Starting k-shot experiments for VisA ---"
@@ -52,11 +53,12 @@ do
         --image_res 672 \
         --k_shot $k \
         --layers="-12,-13,-14,-15,-16,-17,-18" \
-        --model_ckpt "facebook/dinov3-vit7b16-pretrain-lvd1689m" \
+        --model_ckpt "facebook/dinov2-with-registers-giant" \
         --aug_count 30 \
         --pca_ev 0.99 \
         --agg_method "mean" \
-        --outdir "few_shot_results/results_k${k}_visa"
+        --outdir "FINALfew_shot_results/results_k${k}_visa_dinov2G" \
+        --save_intro_overlays 
 done
 
 echo "--- All experiments complete ---"

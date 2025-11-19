@@ -24,16 +24,16 @@ VISA_PATH="../AnomalyDINO/VisA_pytorch/1cls/"
 # -----------------------------------------------------------------
 
 
-echo "--- Running Full-Shot (all train images) for MVTec AD ---"
-conda run -n pcadino python -u main.py \
-    --dataset_name mvtec_ad \
-    --dataset_path "$MVTEC_PATH" \
-    --image_res 448 \
-    --layers="-12,-13,-14,-15,-16,-17,-18" \
-    --model_ckpt "facebook/dinov3-vit7b16-pretrain-lvd1689m" \
-    --pca_ev 0.99 \
-    --agg_method "mean" \
-    --outdir "results_full_shot/mvtec"
+# echo "--- Running Full-Shot (all train images) for MVTec AD ---"
+# conda run -n pcadino python -u main.py \
+#     --dataset_name mvtec_ad \
+#     --dataset_path "$MVTEC_PATH" \
+#     --image_res 672 \
+#     --layers="-12,-13,-14,-15,-16,-17,-18" \
+#     --model_ckpt "facebook/dinov2-with-registers-giant" \
+#     --pca_ev 0.99 \
+#     --agg_method "mean" \
+#     --outdir "FINALresults_full_shot/mvtec_dinov2G"
 
 echo "--- Running Full-Shot (all train images) for VisA ---"
 conda run -n pcadino python -u main.py \
@@ -41,9 +41,9 @@ conda run -n pcadino python -u main.py \
     --dataset_path "$VISA_PATH" \
     --image_res 672 \
     --layers="-12,-13,-14,-15,-16,-17,-18" \
-    --model_ckpt "facebook/dinov3-vit7b16-pretrain-lvd1689m" \
+    --model_ckpt "facebook/dinov2-with-registers-giant" \
     --pca_ev 0.99 \
     --agg_method "mean" \
-    --outdir "results_full_shot/visa"
+    --outdir "FINAL_results_full_shot/visa_dinov2G"
 
 echo "--- All experiments complete ---"
