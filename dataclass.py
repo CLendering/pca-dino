@@ -56,30 +56,55 @@ class MVTecADDataset(BaseDatasetHandler):
         )
 
 
-class VisASimpleDataset(BaseDatasetHandler):
-    """Handler for VisA dataset with structure:
-    category/
-    ├── ground_truth/bad/*.png
-    ├── test/{good,bad}/*.JPG
-    └── train/good/*.JPG
+class MVTecLOCODataset(BaseDatasetHandler):
+    """
+    Handler for MVTec LOCO AD.
+    Structure:
+        train/good
+        validation/good
+        test/good, test/logical_anomalies, test/structural_anomalies
+        ground_truth/logical_anomalies/000/000.png (nested) OR standard _mask.png
     """
 
     def get_train_paths(self):
-        return sorted(glob.glob(str(self.category_path / "train" / "good" / "*.JPG")))
+        return sorted(glob.glob(str(self.category_path / "train" / "good" / "*.png")))
+
+    def get_validation_paths(self):
+        return sorted(
+            glob.glob(str(self.category_path / "validation" / "good" / "*.png"))
+        )
 
     def get_test_paths(self):
-        # include both good and bad
-        return sorted(glob.glob(str(self.category_path / "test" / "*" / "*.JPG")))
+        # MVTec LOCO has subdirectories like 'structural_anomalies' and 'logical_anomalies'
+        # We use recursive glob to find all .png files under test/
+        return sorted(glob.glob(str(self.category_path / "test" / "**" / "*.png"), recursive=True))
 
     def get_ground_truth_path(self, test_path: str):
         p = Path(test_path)
-        # only bad samples have masks
-        if "bad" in p.parts:
-            mask_path = self.category_path / "ground_truth" / "bad" / f"{p.stem}.png"
-            if mask_path.exists():
-                return str(mask_path)
-        # good samples → no ground truth
+        anomaly_type = p.parent.name  # e.g., 'logical_anomalies'
+        
+        if anomaly_type == "good":
+            return None
+
+        # 1. Try Standard MVTec AD format: ground_truth/type/000_mask.png
+        candidate_1 = self.category_path / "ground_truth" / anomaly_type / f"{p.stem}_mask.png"
+        if candidate_1.exists():
+            return str(candidate_1)
+
+        # 2. Try Nested LOCO format: ground_truth/type/000/000.png
+        # (Often used for logical anomalies where masks might be separated)
+        candidate_2 = self.category_path / "ground_truth" / anomaly_type / p.stem / "000.png"
+        if candidate_2.exists():
+            return str(candidate_2)
+            
+        # 3. Fallback: Try Nested with same name: ground_truth/type/000/000.png (if stem is 000)
+        # Some versions might use just the filename inside a folder of the same name
+        candidate_3 = self.category_path / "ground_truth" / anomaly_type / p.stem / f"{p.name}"
+        if candidate_3.exists():
+            return str(candidate_3)
+
         return None
+
 
 class MVTecAD2Dataset(BaseDatasetHandler):
     """Handler for the MVTec AD 2 dataset structure."""
@@ -106,6 +131,32 @@ class MVTecAD2Dataset(BaseDatasetHandler):
             / p.parent.name
             / f"{p.stem}_mask.png"
         )
+
+
+class VisASimpleDataset(BaseDatasetHandler):
+    """Handler for VisA dataset with structure:
+    category/
+    ├── ground_truth/bad/*.png
+    ├── test/{good,bad}/*.JPG
+    └── train/good/*.JPG
+    """
+
+    def get_train_paths(self):
+        return sorted(glob.glob(str(self.category_path / "train" / "good" / "*.JPG")))
+
+    def get_test_paths(self):
+        # include both good and bad
+        return sorted(glob.glob(str(self.category_path / "test" / "*" / "*.JPG")))
+
+    def get_ground_truth_path(self, test_path: str):
+        p = Path(test_path)
+        # only bad samples have masks
+        if "bad" in p.parts:
+            mask_path = self.category_path / "ground_truth" / "bad" / f"{p.stem}.png"
+            if mask_path.exists():
+                return str(mask_path)
+        # good samples → no ground truth
+        return None
 
 
 class VisADataset(BaseDatasetHandler):
@@ -193,22 +244,8 @@ class VisADataset(BaseDatasetHandler):
         return str(mask_path)
 
 
-def get_dataset_handler(name: str, root_path: str, category: str) -> BaseDatasetHandler:
-    """Factory function to get the correct dataset handler."""
-    if name == "mvtec_ad":
-        return MVTecADDataset(root_path, category)
-    elif name == "mvtec_ad2":
-        return MVTecAD2Dataset(root_path, category)
-    elif name == "visa":
-        return VisASimpleDataset(root_path, category)
-    elif name == "blade30":
-        return Blade30Dataset(root_path, category)
-    else:
-        raise ValueError(f"Unknown dataset: {name}")
-
-
 class Blade30Dataset(BaseDatasetHandler):
-    """Handler for the original MVTec AD dataset structure."""
+    """Handler for the Blade30 dataset structure."""
 
     def get_train_paths(self):
         return sorted(glob.glob(str(self.category_path / "train" / "good" / "*.jpg")))
@@ -221,3 +258,19 @@ class Blade30Dataset(BaseDatasetHandler):
         return str(
             self.category_path / "ground_truth" / p.parent.name / f"{p.stem}_mask.png"
         )
+
+
+def get_dataset_handler(name: str, root_path: str, category: str) -> BaseDatasetHandler:
+    """Factory function to get the correct dataset handler."""
+    if name == "mvtec_ad":
+        return MVTecADDataset(root_path, category)
+    elif name == "mvtec_loco":
+        return MVTecLOCODataset(root_path, category)
+    elif name == "mvtec_ad2":
+        return MVTecAD2Dataset(root_path, category)
+    elif name == "visa":
+        return VisASimpleDataset(root_path, category)
+    elif name == "blade30":
+        return Blade30Dataset(root_path, category)
+    else:
+        raise ValueError(f"Unknown dataset: {name}")
