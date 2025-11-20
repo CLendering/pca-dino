@@ -42,6 +42,13 @@ random.seed(42)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {DEVICE}")
 
+# Logical composition branch
+from logical import (
+    fit_logical_model,
+    fuse_image_score,
+    compute_combined_logical_score,
+)
+
 
 def fit_pca_model(train_paths, extractor, aug_transform, args, layers, grouped_layers):
     """
@@ -275,8 +282,206 @@ def fit_pca_model(train_paths, extractor, aug_transform, args, layers, grouped_l
             total_tokens,
             num_batches,
         )
-    
+
     return pca_params, h_p, w_p, feature_dim
+
+
+def collect_branch_scores(
+    paths,
+    extractor,
+    pca_params,
+    args,
+    h_p,
+    w_p,
+    feature_dim,
+    category,
+    logical_model,
+):
+    """
+    One validation pass to collect:
+      - texture (PCA/SubspaceAD) image scores
+      - logical-composition image scores
+
+    Used to compute z-normalization stats for fusion.
+    Only meaningful in full-image mode with a non-empty logical_model.
+    """
+    tex_scores = []
+    log_scores = []
+
+    if not paths:
+        return tex_scores, log_scores
+
+    if not logical_model:
+        logging.warning(
+            f"[Logical] collect_branch_scores called for {category} but logical_model is empty."
+        )
+        return tex_scores, log_scores
+
+    if args.patch_size is not None:
+        logging.warning(
+            f"[Logical] collect_branch_scores called with patch mode for {category}, "
+            "but logical branch only supports full-image mode. Skipping logical stats."
+        )
+        return tex_scores, log_scores
+
+    logging.info(
+        f"[Logical] Collecting branch scores on {len(paths)} validation images for {category}..."
+    )
+    eval_iter = tqdm(paths, desc=f"Collecting branch scores {category}")
+
+    layers = parse_layer_indices(args.layers)
+    grouped_layers = (
+        parse_grouped_layers(args.grouped_layers) if args.agg_method == "group" else []
+    )
+
+    for i in range(0, len(paths), args.batch_size):
+        path_batch = paths[i : i + args.batch_size]
+        pil_imgs = [Image.open(p).convert("RGB") for p in path_batch]
+
+        # Full-image feature extraction
+        (
+            tokens,
+            (h_p, w_p),
+            saliency_masks_batch,
+        ) = extractor.extract_tokens(
+            pil_imgs,
+            args.image_res,
+            layers,
+            args.agg_method,
+            grouped_layers,
+            args.docrop,
+            use_clahe=args.use_clahe,
+            dino_saliency_layer=args.dino_saliency_layer,
+        )
+        b, _, _, c = tokens.shape
+        tokens_reshaped = tokens.reshape(b * h_p * w_p, c)
+
+        scores = calculate_anomaly_scores(
+            tokens_reshaped, pca_params, args.score_method, args.drop_k
+        )
+        anomaly_maps = scores.reshape(b, h_p, w_p)
+
+        # Background mask logic (same as in run_evaluation)
+        mask_for_viz = None
+        background_mask = np.zeros_like(anomaly_maps, dtype=bool)
+
+        if args.bg_mask_method == "dino_saliency":
+            mask_for_viz = saliency_masks_batch
+            for j in range(b):
+                saliency_map = saliency_masks_batch[j]
+                try:
+                    if args.mask_threshold_method == "percentile":
+                        threshold = np.percentile(
+                            saliency_map, args.percentile_threshold * 100
+                        )
+                        background_mask[j] = saliency_map < threshold
+                    else:  # otsu
+                        norm_mask = cv2.normalize(
+                            saliency_map,
+                            None,
+                            0,
+                            255,
+                            cv2.NORM_MINMAX,
+                            dtype=cv2.CV_8U,
+                        )
+                        _, binary_mask = cv2.threshold(
+                            norm_mask,
+                            0,
+                            255,
+                            cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+                        )
+                        background_mask[j] = binary_mask == 0
+                except Exception as e:
+                    logging.warning(f"[Logical] Saliency mask failed (val) img {j}: {e}")
+
+        elif args.bg_mask_method == "pca_normality":
+            threshold = 10.0
+            kernel_size = 3
+            border = 0.2
+            grid_size = (h_p, w_p)
+            kernel = np.ones((kernel_size, kernel_size), np.uint8)
+            mask_for_viz = np.zeros_like(anomaly_maps)
+
+            for j in range(b):
+                img_features = tokens[j].reshape(-1, c)
+                try:
+                    pca = PCA(n_components=1, svd_solver="randomized")
+                    first_pc = pca.fit_transform(img_features.astype(np.float32))
+                    mask = first_pc > threshold
+                    mask_2d = mask.reshape(grid_size)
+
+                    h_start, h_end = int(grid_size[0] * border), int(
+                        grid_size[0] * (1 - border)
+                    )
+                    w_start, w_end = int(grid_size[1] * border), int(
+                        grid_size[1] * (1 - border)
+                    )
+                    m = mask_2d[h_start:h_end, w_start:w_end]
+
+                    if m.sum() <= m.size * 0.35:
+                        mask = -first_pc > threshold
+                        mask_2d = mask.reshape(grid_size)
+
+                    mask_processed = cv2.dilate(
+                        mask_2d.astype(np.uint8), kernel
+                    ).astype(bool)
+                    mask_processed = cv2.morphologyEx(
+                        mask_processed.astype(np.uint8), cv2.MORPH_CLOSE, kernel
+                    ).astype(bool)
+
+                    background_mask[j] = ~mask_processed
+                    mask_for_viz[j] = mask_processed.astype(np.float32)
+                except Exception as e:
+                    logging.warning(f"[Logical] PCA mask failed (val) img {j}: {e}")
+
+        anomaly_maps[background_mask] = 0.0
+
+        # Per-image scores
+        for j in range(anomaly_maps.shape[0]):
+            anomaly_map_pre_specular = post_process_map(
+                anomaly_maps[j], args.image_res
+            )
+            anomaly_map_final = anomaly_map_pre_specular
+
+            if args.use_specular_filter:
+                img_tensor = TF.to_tensor(pil_imgs[j]).unsqueeze(0).to(DEVICE)
+                _, _, conf = specular_mask_torch(img_tensor, tau=args.specular_tau)
+                conf = torch.nn.functional.interpolate(
+                    conf,
+                    size=anomaly_map_final.shape,
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                conf_map = conf.squeeze().cpu().numpy()
+                anomaly_map_final = (
+                    filter_specular_anomalies(anomaly_map_final, conf_map)
+                    .cpu()
+                    .numpy()
+                )
+
+            # Texture / PCA image score
+            local_img_score = aggregate_image_score(
+                anomaly_map_final, args.img_score_agg
+            )
+            tex_scores.append(float(local_img_score))
+
+            # Logical-composition image score
+            tokens_spatial_j = tokens[j]  # [h_p, w_p, C]
+            try:
+                s_log = compute_combined_logical_score(
+                    tokens_spatial_j,
+                    logical_model,
+                )
+                log_scores.append(float(s_log))
+            except Exception as e:
+                logging.warning(
+                    f"[Logical] Failed to compute logical score for val image "
+                    f"{path_batch[j]}: {e}"
+                )
+
+        eval_iter.update(len(path_batch))
+
+    return tex_scores, log_scores
 
 
 def run_evaluation(
@@ -292,6 +497,7 @@ def run_evaluation(
     is_test_run=False,
     thr_img=None,
     thr_px=None,
+    logical_model=None,
 ):
     """
     Runs evaluation on a set of images (validation or test).
@@ -309,7 +515,7 @@ def run_evaluation(
         "inference_times": [],
     }
     vis_saved_count = 0
-    
+
     if not paths:
         return results
 
@@ -329,7 +535,8 @@ def run_evaluation(
 
         # --- 1. COMPUTATION STAGE (Image -> Final Anomaly Map) ---
         final_anomaly_maps_for_batch = []
-        saliency_maps_for_viz_batch = []
+        saliency_maps_for_viz_batch = None
+        tokens_batch_for_logical = None  # for logical fusion (full-image only)
 
         if args.patch_size:
             (
@@ -339,7 +546,7 @@ def run_evaluation(
                 pil_imgs, extractor, pca_params, args, DEVICE, h_p, w_p, feature_dim
             )
             saliency_maps_for_viz_batch = saliency_maps_batch
-            
+
             for j, anomaly_map_pre_specular in enumerate(anomaly_maps_batch):
                 anomaly_map_final = anomaly_map_pre_specular
                 if args.use_specular_filter:
@@ -455,9 +662,10 @@ def run_evaluation(
                         mask_for_viz[j] = mask_processed.astype(np.float32)
                     except Exception as e:
                         logging.warning(f"PCA mask failed for image {j}: {e}")
-            
+
             anomaly_maps[background_mask] = 0.0
             saliency_maps_for_viz_batch = mask_for_viz
+            tokens_batch_for_logical = tokens  # [B, h_p, w_p, C]
 
             for j in range(anomaly_maps.shape[0]):
                 anomaly_map_pre_specular = post_process_map(
@@ -494,26 +702,49 @@ def run_evaluation(
             path = path_batch[j]
             pil_img = pil_imgs[j]
 
-            img_score = aggregate_image_score(anomaly_map_final, args.img_score_agg)
+            # Local (SubspaceAD) image-level score
+            local_img_score = aggregate_image_score(
+                anomaly_map_final, args.img_score_agg
+            )
+
+            # Fuse with logical composition branch if available (full-image only)
+            fused_img_score = local_img_score
+            if (logical_model is not None) and bool(logical_model) and (
+                tokens_batch_for_logical is not None
+            ):
+                try:
+                    tokens_spatial_j = tokens_batch_for_logical[j]  # [h_p, w_p, C]
+                    fused_img_score = fuse_image_score(
+                        local_img_score,
+                        tokens_spatial_j,
+                        logical_model,
+                    )
+                except Exception as e:
+                    logging.warning(
+                        f"Logical fusion failed for image {path}: {e}. "
+                        "Using local score only."
+                    )
+                    fused_img_score = local_img_score
+
             results["img_labels"].append(1 if is_anomaly else 0)
-            results["img_scores_auroc"].append(float(img_score))
+            results["img_scores_auroc"].append(float(fused_img_score))
             if thr_img is not None:
-                results["img_scores_f1"].append(1 if img_score >= thr_img else 0)
+                results["img_scores_f1"].append(1 if fused_img_score >= thr_img else 0)
 
             anomaly_map_normalized = min_max_norm(anomaly_map_final)
             H, W = anomaly_map_normalized.shape
 
             # Ground Truth Mask Handling
             if args.patch_size:
-                 gt_mask = handler.get_ground_truth_mask(path, pil_img.size)
-                 gt_mask = (
-                            np.array(
-                                Image.fromarray(
-                                    (gt_mask.astype(np.uint8) * 255)
-                                ).resize((W, H), resample=Image.NEAREST)
-                            )
-                            > 127
-                        ).astype(np.uint8)
+                gt_mask = handler.get_ground_truth_mask(path, pil_img.size)
+                gt_mask = (
+                    np.array(
+                        Image.fromarray(
+                            (gt_mask.astype(np.uint8) * 255)
+                        ).resize((W, H), resample=Image.NEAREST)
+                    )
+                    > 127
+                ).astype(np.uint8)
             else:
                 gt_path_str = handler.get_ground_truth_path(path)
                 if not gt_path_str or not os.path.exists(gt_path_str):
@@ -604,7 +835,7 @@ def run_evaluation(
                                     binary_mask = (binary_mask_u8 > 0).astype(
                                         np.float32
                                     )
-                            
+
                             saliency_map_for_viz = post_process_map(
                                 binary_mask, anomaly_map_normalized.shape, blur=False
                             )
@@ -622,7 +853,7 @@ def run_evaluation(
                         saliency_mask=saliency_map_for_viz,
                     )
                     vis_saved_count += 1
-        
+
         eval_iter.update(len(path_batch))
 
     return results
@@ -704,7 +935,9 @@ def main():
             continue
 
         if args.batched_zero_shot:
-            logging.info(f"--- Batched 0-Shot Mode: Fitting PCA on {len(test_paths)} test images ---")
+            logging.info(
+                f"--- Batched 0-Shot Mode: Fitting PCA on {len(test_paths)} test images ---"
+            )
             train_paths = test_paths.copy()
             val_paths = None
 
@@ -717,6 +950,58 @@ def main():
         pca_params, h_p, w_p, feature_dim = fit_pca_model(
             train_paths, extractor, current_aug_transform, args, layers, grouped_layers
         )
+
+        # 1.5 Fit Logical Composition Model (optional, full-image only)
+        logical_model = None
+        if getattr(args, "use_logical_branch", False):
+            logical_model = fit_logical_model(
+                train_paths,
+                extractor,
+                args,
+                layers,
+                grouped_layers,
+            )
+        else:
+            logical_model = None
+
+        # 1.75 Compute fusion (z-score) stats on validation set for logical branch
+        if logical_model and val_paths:
+            tex_scores_val, log_scores_val = collect_branch_scores(
+                val_paths,
+                extractor,
+                pca_params,
+                args,
+                h_p,
+                w_p,
+                feature_dim,
+                category,
+                logical_model,
+            )
+            if len(tex_scores_val) > 0 and len(log_scores_val) > 0:
+                tex_scores_arr = np.array(tex_scores_val, dtype=np.float64)
+                log_scores_arr = np.array(log_scores_val, dtype=np.float64)
+
+                fusion_state = {
+                    "tex_mu": float(tex_scores_arr.mean()),
+                    "tex_std": float(tex_scores_arr.std() + 1e-6),
+                    "log_mu": float(log_scores_arr.mean()),
+                    "log_std": float(log_scores_arr.std() + 1e-6),
+                }
+                logical_model["fusion_state"] = fusion_state
+                logging.info(
+                    "[Logical] Fusion stats for %s: "
+                    "tex_mu=%.4f tex_std=%.4f log_mu=%.4f log_std=%.4f",
+                    category,
+                    fusion_state["tex_mu"],
+                    fusion_state["tex_std"],
+                    fusion_state["log_mu"],
+                    fusion_state["log_std"],
+                )
+            else:
+                logging.warning(
+                    "[Logical] Could not compute fusion stats for %s (empty scores).",
+                    category,
+                )
 
         # 2. Determine PR-optimal F1 thresholds
         thr_img, thr_px = None, None
@@ -733,16 +1018,21 @@ def main():
                 feature_dim,
                 category,
                 is_test_run=False,
+                logical_model=logical_model,
             )
-            
+
             target_img_fpr = getattr(args, "target_img_fpr", 0.05)
             target_px_fpr = getattr(args, "target_px_fpr", 0.05)
 
             thr_img, how_img = pick_threshold_with_fallback(
-                val_results["img_labels"], val_results["img_scores_auroc"], target_img_fpr
+                val_results["img_labels"],
+                val_results["img_scores_auroc"],
+                target_img_fpr,
             )
             thr_px, how_px = pick_threshold_with_fallback(
-                val_results["px_labels_all"], val_results["px_scores_norm_all"], target_px_fpr
+                val_results["px_labels_all"],
+                val_results["px_scores_norm_all"],
+                target_px_fpr,
             )
             logging.info(
                 f"Chosen thresholds — Image: {thr_img if thr_img is not None else float('nan'):.6g} "
@@ -766,6 +1056,7 @@ def main():
             is_test_run=True,
             thr_img=thr_img,
             thr_px=thr_px,
+            logical_model=logical_model,
         )
 
         # 4. Report Timings
@@ -819,8 +1110,15 @@ def main():
         if test_results["anom_gt_masks"]:
             preds_np = np.stack(test_results["anom_maps_norm"]).astype(np.float32)
             gts_np = np.stack(test_results["anom_gt_masks"]).astype(np.uint8)
-            preds_t = torch.from_numpy(preds_np).unsqueeze(1).to(torch.float32).to(DEVICE)
-            gts_t = torch.from_numpy(gts_np).unsqueeze(1).to(torch.bool).to(DEVICE)
+            preds_t = (
+                torch.from_numpy(preds_np)
+                .unsqueeze(1)
+                .to(torch.float32)
+                .to(DEVICE)
+            )
+            gts_t = (
+                torch.from_numpy(gts_np).unsqueeze(1).to(torch.bool).to(DEVICE)
+            )
 
             fpr_cap = getattr(args, "pro_integration_limit", 0.3)
             tm_metric = TM_AUPRO(fpr_limit=fpr_cap).to(DEVICE)
@@ -851,7 +1149,12 @@ def main():
         all_results_df = pd.concat([all_results_df, mean_row], ignore_index=True)
 
     logging.info("\n--- Benchmark Final Results ---")
-    logging.info("\n" + all_results_df.to_string(index=False, float_format="%.4f", na_rep="N/A"))
+    logging.info(
+        "\n"
+        + all_results_df.to_string(
+            index=False, float_format="%.4f", na_rep="N/A"
+        )
+    )
 
     results_path = os.path.join(args.outdir, "benchmark_results.csv")
     all_results_df.to_csv(results_path, index=False, float_format="%.4f")

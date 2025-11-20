@@ -33,7 +33,7 @@ def get_args():
         "--dataset_name",
         type=str,
         required=True,
-        choices=["mvtec_ad", "mvtec_ad2", "visa", "blade30"],
+        choices=["mvtec_ad", "mvtec_ad2", "visa", "blade30","mvtec_loco"],
         help="Name of the dataset to use.",
     )
     data_group.add_argument(
@@ -271,6 +271,67 @@ def get_args():
         "--batched_zero_shot",
         action="store_true",
         help="Run in batched zero-shot mode, fitting PCA on the test set.",
+    )
+
+    logical_group = parser.add_argument_group("Logical Composition Modeling Arguments")
+    logical_group.add_argument(
+        "--use_logical_branch",
+        action="store_true",
+        help=(
+            "Enable training-free logical/composition branch on top of "
+            "SubspaceAD (full-image mode only, not supported with --patch_size)."
+        ),
+    )
+    logical_group.add_argument(
+        "--logical_num_parts",
+        type=int,
+        default=6,
+        help="Number of semantic part clusters (K) for the logical branch.",
+    )
+    logical_group.add_argument(
+        "--logical_cluster_batch_size",
+        type=int,
+        default=4096,
+        help="MiniBatchKMeans batch size for token clustering.",
+    )
+    logical_group.add_argument(
+        "--logical_max_tokens_per_image",
+        type=int,
+        default=4096,
+        help=(
+            "Maximum tokens per image used for clustering. "
+            "If None, use all tokens."
+        ),
+    )
+    logical_group.add_argument(
+        "--logical_w_local",
+        type=float,
+        default=1.0,
+        help="Weight for local (SubspaceAD) image-level score in fusion.",
+    )
+    logical_group.add_argument(
+        "--logical_w_count",
+        type=float,
+        default=1.0,
+        help="Weight for part-count logical score in fusion.",
+    )
+    logical_group.add_argument(
+        "--logical_w_pos",
+        type=float,
+        default=1.0,
+        help="Weight for spatial-layout logical score in fusion.",
+    )
+    logical_group.add_argument(
+        "--logical_w_adj",
+        type=float,
+        default=1.0,
+        help="Weight for adjacency-distribution logical score in fusion.",
+    )
+    logical_group.add_argument(
+        "--logical_w_feat",
+        type=float,
+        default=1.0,
+        help="Weight for per-part feature-consistency logical score in fusion.",
     )
 
     args = parser.parse_args()
